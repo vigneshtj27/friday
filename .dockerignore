@@ -1,0 +1,7 @@
+.venv
+data
+.git
+.pytest_cache
+**/__pycache__
+friday/web/static/novnc
+.env

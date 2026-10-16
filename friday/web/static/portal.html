@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>friday</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--text:#16181d;--muted:#667085;--line:#e4e7ec;--accent:#2457d6;--ok:#127a3e;--warn:#a15c00;--bad:#b42318;--chip:#eef1f6}
+@media (prefers-color-scheme: dark){:root{--bg:#0f1115;--panel:#171a21;--text:#e7e9ee;--muted:#98a2b3;--line:#2a2f3a;--accent:#6c9cff;--ok:#4cc38a;--warn:#f0b35a;--bad:#ff7b72;--chip:#222734}}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
+header{display:flex;align-items:center;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:2;flex-wrap:wrap}
+header b{font-size:16px}
+nav{display:flex;gap:4px;flex-wrap:wrap}
+nav a{color:var(--muted);text-decoration:none;padding:6px 10px;border-radius:6px}
+nav a.on{background:var(--chip);color:var(--text)}
+.badge{display:inline-block;min-width:18px;padding:0 6px;border-radius:9px;background:var(--bad);color:#fff;font-size:11px;text-align:center;margin-left:4px}
+main{max-width:1100px;margin:0 auto;padding:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.grow{flex:1}
+h2{font-size:15px;margin:0 0 10px}
+h3{font-size:13px;margin:12px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+table{width:100%;border-collapse:collapse}
+td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:500;font-size:12px}
+.muted{color:var(--muted)} .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+.chip{display:inline-block;padding:1px 8px;border-radius:10px;background:var(--chip);font-size:12px}
+button,input,select{font:inherit;padding:6px 10px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--text)}
+button{cursor:pointer} button.primary{background:var(--accent);border-color:var(--accent);color:#fff} button.danger{color:var(--bad);border-color:var(--bad)}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--chip);padding:8px;border-radius:6px;margin:4px 0;max-height:320px;overflow:auto;font-size:12px}
+.step{border-left:3px solid var(--line);padding:4px 10px;margin:6px 0}
+.step.tool{border-color:var(--accent)} .step.state{border-color:var(--ok)} .step.system{border-color:var(--warn)} .step.handoff,.step.warning{border-color:var(--bad)}
+.step img{max-width:360px;border:1px solid var(--line);border-radius:4px;margin-top:4px;cursor:zoom-in}
+.empty{color:var(--muted);padding:8px 0}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+@media (max-width:640px){td,th{padding:5px 4px}.step img{max-width:100%}}
+</style>
+</head>
+<body>
+<header>
+  <b>friday</b>
+  <nav id="nav"></nav>
+  <span class="grow"></span>
+  <span class="muted" id="meta"></span>
+  <form method="post" action="/logout"><button>Log out</button></form>
+</header>
+<main id="view"><div class="empty">Loading…</div></main>
+<script src="/static/portal.js"></script>
+</body>
+</html>

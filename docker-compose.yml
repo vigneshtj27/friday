@@ -1,0 +1,39 @@
+# friday: one container with Google Chrome, Xvfb, x11vnc and the app.
+#
+#   cp env.example .env   # fill in FRIDAY_MASTER_KEY, FRIDAY_ADMIN_PASSWORD_HASH, ...
+#   docker compose up -d --build
+#
+# The portal and remote view listen on 127.0.0.1 only. Reach them through a VPN
+# (Tailscale/WireGuard) or an SSH tunnel; do not publish the port to the internet.
+services:
+  friday:
+    build: .
+    image: friday:latest
+    platform: linux/amd64          # Google ships Chrome for Linux on amd64 only
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      FRIDAY_DATA_DIR: /data
+      FRIDAY_BIND_HOST: 0.0.0.0    # inside the container; the published port below is localhost-only
+      FRIDAY_DISPLAY_BACKEND: xvfb
+      # The /data bind mount must live on an encrypted disk (LUKS, FileVault, gocryptfs...).
+      # Detection cannot see through Docker, so you assert it here.
+      FRIDAY_VOLUME_ENCRYPTED_ASSERT: "true"
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ${FRIDAY_HOST_DATA:-./data}:/data
+    shm_size: 1gb                  # Chrome needs more than Docker's 64 MB /dev/shm
+    security_opt:
+      # Docker's default seccomp profile + the namespace syscalls Chrome's sandbox needs.
+      # Regenerate with: python scripts/gen_chrome_seccomp.py
+      - seccomp=./docker/chrome-seccomp.json
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

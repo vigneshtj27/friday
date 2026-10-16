@@ -1,0 +1,36 @@
+# Decisions and their reasons
+
+Choices the brief left open, made while building. Each can be changed; the reason is here so you can judge.
+
+| Area | Choice | Why |
+|---|---|---|
+| Language / server | Python 3.12+, FastAPI, uvicorn | Playwright, Patchright and nodriver are all Python-first; one language end to end. |
+| Database | SQLite (WAL) | Single user, single host. No server to run or secure. |
+| Encryption | libsodium via PyNaCl, XChaCha20-Poly1305 AEAD | Authenticated; random 192-bit nonces are safe; the secret's name is bound as associated data so a ciphertext copied to another row will not decrypt. Purpose-specific subkeys (secrets, files, sessions) are derived with BLAKE2b. |
+| Master key | `FRIDAY_MASTER_KEY` env, or the OS keyring | As the brief asked. Docker uses the env var. |
+| Profile encryption at rest | Rely on volume encryption (FileVault / LUKS / gocryptfs) and check for it | Chrome needs plain files while it runs, so app-level encryption of a live profile is not possible. `FRIDAY_VOLUME_CHECK=require` refuses to open a profile on a volume it cannot confirm is encrypted; inside Docker you assert it with `FRIDAY_VOLUME_ENCRYPTED_ASSERT=true`. |
+| Remote view | Xvfb + x11vnc (localhost only) + noVNC, bridged through the authenticated app over WebSocket | VNC shows the whole display: native dialogs, permission prompts and the address bar, which a CDP screencast cannot. The VNC port is never exposed; the app's WebSocket checks the session cookie and Origin. A random VNC password per session adds a second lock. noVNC is vendored, not loaded from a CDN. |
+| macOS | Native window instead of Xvfb | For development. The handoff page says "use the Chrome window on the host". |
+| Driver default | `playwright` (Google Chrome, `channel="chrome"`, headed) | Honest, no stealth patches. |
+| `patchright` | Available, opt-in per profile or globally; audited as `stealth=true` | Rule 4: only after a diagnosis says so. |
+| `cdp` driver | Chrome started as a plain process, Playwright attaches over CDP | Closest to what nodriver does (no automation launch flags), while keeping one page API for the agent's tools. |
+| nodriver | Evaluated, not integrated | Separate async API (no Playwright locators, downloads, routing); integrating it means a second implementation of every tool. The `cdp` driver captures its main idea. Observed on Chrome 155: `navigator.webdriver` was `true` with both `playwright` and `cdp`, so `cdp` alone does not hide automation (and this project doesn't try to). |
+| Chrome sandbox | On. Playwright disables it on Linux by default; we pass `chromium_sandbox=True`. | `--no-sandbox` is a security downgrade and shows a warning bar real users never see. |
+| Sandbox in Docker | A seccomp profile = Docker's default + `clone`/`unshare`/`setns` | Docker's default profile blocks the user namespaces Chrome's sandbox needs. This is far narrower than `seccomp=unconfined` or `--cap-add SYS_ADMIN`, and the container runs with `cap_drop: ALL` and `no-new-privileges`. `FRIDAY_CHROME_SANDBOX=false` exists as a last resort and is logged on every open. |
+| Locale/timezone | `TZ` env + `--lang`/`LANG` for the Chrome process, not Playwright's emulation overrides | What the page sees is what this Chrome genuinely is. On macOS Chrome ignores `--lang`; the `cdp` driver passes `-AppleLanguages`, which the Playwright driver cannot (it rejects non-flag arguments). |
+| Fonts in the image | Liberation, Noto core, Noto CJK, Noto emoji | Missing glyph coverage is a cheap fingerprint tell and breaks non-Latin pages. |
+| Model | `claude-opus-5-5`, adaptive thinking, effort `high`, server-side refusal fallbacks on | Most capable default. Configurable via `FRIDAY_MODEL` / `FRIDAY_MODEL_EFFORT`. History is append-only (the API requires this for thinking blocks); operator updates go in mid-conversation `system` messages, which are also the prompt-injection-safe channel. |
+| Policy | Code classifies every interactive tool call: ALLOW / NEEDS_APPROVAL / DENY | Rule 7. Submits are allowed only in sign-in, filter and search forms; anything labelled pay/transfer/payee/save/change/cancel/agree/... needs approval, per action, with a masked screenshot of the page. When unsure, it asks. |
+| Navigation allowlist | Enforced twice: in the `goto`/link policy and at the network layer (`context.route`) for any main-frame navigation | Stops page-initiated redirects to other domains, not just the agent's own. Side effect: Playwright routing disables the HTTP cache for that context. |
+| Secrets to the model | Never. The model types `secret:<name>`; the injector checks that the secret belongs to the current profile and that the field's own frame is on the site's domains over HTTPS (localhost exempt for the mock bank). | Prevents prompt injection from steering a password into another site or another account's form. |
+| OTP codes | Held in memory as single-use ephemeral secrets (5 min), redacted everywhere | "Never reuse or log OTP codes." |
+| SMS codes | Ask the owner (portal, Telegram/ntfy/WhatsApp reply, or an Android SMS-forwarder webhook) | As the brief asked. Replies are only accepted from the configured chat/number/token and only resolve a pending request. |
+| Gmail | OAuth installed-app flow with PKCE, scope `gmail.readonly`, refresh token in the vault | Match by sender and time after submit. If a site has no configured sender, falls back to searching by site name plus "code/OTP"; set `otp_senders` for reliability. |
+| Diagnosis experiments | Page-load probes run automatically (no credentials); the manual-login test runs on request; credential-submitting variants are not automated | Repeated credential submissions can lock real accounts. Probes plus the manual test isolate most causes without that risk. |
+| IP geolocation in diagnosis | `FRIDAY_GEOIP_URL` (default `https://ipinfo.io/json`), fetched through the profile's own network path | Needed for the timezone-vs-IP check. It tells that service your egress IP; set it empty to disable. |
+| Currency default | `FRIDAY_DEFAULT_CURRENCY=INR` | Your machine's timezone is Asia/Kolkata. Used only when a CSV has no currency column. |
+| PDF statements | Text extracted with pypdf, rows extracted by the model with a strict JSON schema, then verified in code (date range, balance continuity, stated totals) | No generic PDF table parser is reliable across banks; the code-side checks catch extraction mistakes. Scanned (image-only) PDFs are not supported. |
+| Dedupe | sha256(source, date, amount, direction, normalized description, balance) + occurrence index within the file | Two identical coffees on one day stay two rows; the same statement downloaded twice adds nothing. |
+| Rate limits | One worker per profile, one login per site at a time, ≥60 s between logins to a site, exponential backoff (15 min doubling, max 24 h) after blocked/bounced/rejected/captcha | Rule 6. `force` on a run (portal/CLI) skips backoff, and is audited. |
+| Home egress | Built-in authenticated CONNECT proxy (`friday egress-proxy`) | Runs on any home machine; bind to the VPN address. Refuses private/LAN targets so it is not a door into your network. |
+| `.env.example` | Shipped as `env.example` | A permission rule in this environment blocks writing `.env*` files. Rename it if you like. |
