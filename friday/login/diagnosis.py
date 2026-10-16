@@ -411,7 +411,10 @@ class Diagnoser:
                 pass
             h = self.handoffs.create(profile.id, "Diagnosis: sign in by hand in this browser, then click Done.", op.display.vnc)
             if self.notifier:
-                await self.notifier.send(f"Diagnosis for {profile.id}: please sign in by hand.", self.handoffs.link(h))
+                await self.notifier.send(
+                    f"Diagnosis for {profile.id}: please sign in by hand.", self.handoffs.link(h),
+                    meta={"kind": "handoff", "ref": h.id, "profile_id": profile.id},
+                )  # fmt: skip
             state = await self.handoffs.wait(h.id)
             if state.value != "done":
                 return self.add_experiment(report_id, {"name": "manual", "mode": "submit", "status": "skipped", "notes": f"handoff {state.value}"})

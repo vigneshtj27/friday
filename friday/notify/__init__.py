@@ -26,7 +26,7 @@ ReplyHandler = Callable[[str, str], Awaitable[bool]]  # (text, via) -> handled
 class Notifier:
     name = "base"
 
-    async def send(self, text: str, url: str | None = None) -> None:
+    async def send(self, text: str, url: str | None = None, *, meta: dict[str, Any] | None = None) -> None:
         raise NotImplementedError
 
     async def start(self, on_reply: ReplyHandler) -> None:
@@ -42,7 +42,7 @@ class LogNotifier(Notifier):
     def __init__(self) -> None:
         self.sent: list[tuple[str, str | None]] = []
 
-    async def send(self, text: str, url: str | None = None) -> None:
+    async def send(self, text: str, url: str | None = None, *, meta: dict[str, Any] | None = None) -> None:
         self.sent.append((text, url))
         log.info("NOTIFY: %s %s", text, url or "")
 
@@ -55,7 +55,7 @@ class TelegramNotifier(Notifier):
         self.chat_id = str(chat_id)
         self._task: asyncio.Task[None] | None = None
 
-    async def send(self, text: str, url: str | None = None) -> None:
+    async def send(self, text: str, url: str | None = None, *, meta: dict[str, Any] | None = None) -> None:
         body = text + (f"\n{url}" if url else "")
         async with httpx.AsyncClient(timeout=20) as http:
             r = await http.post(f"{self.base}/sendMessage", json={"chat_id": self.chat_id, "text": body})
@@ -104,7 +104,7 @@ class NtfyNotifier(Notifier):
         self.headers = {"Authorization": f"Bearer {token}"} if token else {}
         self._task: asyncio.Task[None] | None = None
 
-    async def send(self, text: str, url: str | None = None) -> None:
+    async def send(self, text: str, url: str | None = None, *, meta: dict[str, Any] | None = None) -> None:
         headers = dict(self.headers, Title="friday")
         if url:
             headers["Click"] = url
@@ -150,7 +150,7 @@ class WhatsAppNotifier(Notifier):
         self.token = token
         self.to = to
 
-    async def send(self, text: str, url: str | None = None) -> None:
+    async def send(self, text: str, url: str | None = None, *, meta: dict[str, Any] | None = None) -> None:
         body = {"messaging_product": "whatsapp", "to": self.to, "type": "text", "text": {"body": text + (f"\n{url}" if url else "")}}
         async with httpx.AsyncClient(timeout=20) as http:
             r = await http.post(self.url, json=body, headers={"Authorization": f"Bearer {self.token}"})
@@ -164,11 +164,11 @@ class MultiNotifier(Notifier):
         self.notifiers = notifiers
         self.redactor = redactor
 
-    async def send(self, text: str, url: str | None = None) -> None:
+    async def send(self, text: str, url: str | None = None, *, meta: dict[str, Any] | None = None) -> None:
         text = self.redactor.redact(text)
         for n in self.notifiers:
             try:
-                await n.send(text, url)
+                await n.send(text, url, meta=meta)
             except Exception as e:
                 log.warning("%s notification failed: %s", n.name, type(e).__name__)
 
@@ -181,9 +181,10 @@ class MultiNotifier(Notifier):
             await n.stop()
 
 
-def build_notifier(settings: Settings, redactor: Redactor) -> MultiNotifier:
-    wanted = {x.strip() for x in settings.notify.split(",") if x.strip() and x.strip() != "none"}
-    out: list[Notifier] = [LogNotifier()]
+def build_notifier(settings: Settings, redactor: Redactor, chat: Notifier | None = None) -> MultiNotifier:
+    """The built-in chat (when given) is always on; external channels are opt-in."""
+    wanted = {x.strip() for x in settings.notify.split(",") if x.strip() and x.strip() not in ("none", "chat")}
+    out: list[Notifier] = [LogNotifier()] + ([chat] if chat else [])
     for secret in (settings.telegram_bot_token, settings.ntfy_token, settings.whatsapp_token):
         if secret:
             redactor.register("config/notify-token", secret.get_secret_value())

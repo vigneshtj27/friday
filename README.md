@@ -111,7 +111,9 @@ Codes are held in memory as single-use secrets, never logged and never reused.
 
 ## Notifications
 
-`FRIDAY_NOTIFY=telegram` (or `ntfy`, `whatsapp`, comma-separated). See `env.example` for each channel's settings. Messages say what is needed and link to the portal or the remote view; secret values are redacted from every outgoing message. Inbound replies are accepted only from the configured chat, topic or number, and they only resolve a pending code request.
+Everything that needs you arrives in the built-in **chat** at `/chat`, which is also where the app opens after you log in. Code requests, approvals and browser handoffs appear as cards with their own buttons (enter the code, approve or deny with the masked screenshot, open the remote view), and finished runs link to their details. You can also just reply with the code. Codes you type are passed to the waiting sign-in and are never stored: the conversation keeps a masked placeholder. Turn on the bell to get desktop notifications while the tab is in the background. Type `status` to see what is waiting.
+
+External channels are optional and work alongside the chat: `FRIDAY_NOTIFY=telegram` (or `ntfy`, `whatsapp`, comma-separated). See `env.example` for each channel's settings. Messages say what is needed and link to the portal or the remote view; secret values are redacted from every outgoing message. Inbound replies are accepted only from the configured chat, topic or number, and they only resolve a pending code request.
 
 ## The portal
 

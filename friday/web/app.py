@@ -131,8 +131,8 @@ def create_app(ctx: AppContext) -> FastAPI:
     @app.get("/")
     async def index(request: Request):
         if not auth.valid(request.cookies.get(COOKIE)):
-            return RedirectResponse("/login")
-        return RedirectResponse("/portal")
+            return RedirectResponse("/login?next=/chat")
+        return RedirectResponse("/chat")
 
     @app.get("/portal")
     async def portal(request: Request):
@@ -301,6 +301,10 @@ rfb.addEventListener('disconnect', () => document.getElementById('screen').textC
     from friday.web.api import register_api
 
     register_api(app, ctx, require)
+
+    from friday.web.chat_api import register_chat
+
+    register_chat(app, ctx, require, auth)
 
     @app.exception_handler(ProfileBusy)
     async def busy_handler(_: Request, exc: ProfileBusy):

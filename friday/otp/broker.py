@@ -122,7 +122,10 @@ class OtpBroker:
         req = self._create(profile.id, run_id, channel, prompt)
         if self.notifier:
             url = f"{self.portal_url}/#otp" if self.portal_url else None
-            await self.notifier.send(f"{prompt} {note} Reply with just the code within {self.owner_timeout // 60} min.".strip(), url)
+            await self.notifier.send(
+                f"{prompt} {note} Reply with just the code within {self.owner_timeout // 60} min.".strip(), url,
+                meta={"kind": "otp", "ref": req.id, "profile_id": profile.id},
+            )
         try:
             code = await asyncio.wait_for(req._future, timeout=self.owner_timeout)
         except TimeoutError:

@@ -304,7 +304,10 @@ class LoginEngine:
 
     async def _handoff(self, op: Any, run_id: str, reason: str, st: _MachineState, stop: Any) -> HookResult:
         h = self.s.handoffs.create(op.profile.id, reason, op.display.vnc)
-        await self.s.notifier.send(f"{op.site.name} ({op.profile.account}) needs you: {reason}.", self.s.handoffs.link(h))
+        await self.s.notifier.send(
+            f"{op.site.name} ({op.profile.account}) needs you: {reason}.", self.s.handoffs.link(h),
+            meta={"kind": "handoff", "ref": h.id, "profile_id": op.profile.id},
+        )  # fmt: skip
         self.s.runs.step(run_id, "handoff", result=f"{reason} -> {self.s.handoffs.link(h)}")
         state = await self.s.handoffs.wait(h.id)
         if state.value != "done":

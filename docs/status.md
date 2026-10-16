@@ -6,10 +6,11 @@ Last updated 2026-10-16.
 
 | What | How | Where |
 |---|---|---|
-| Unit tests (classifier, OTP extraction, TOTP, approval gate, policy, masking, crypto, dedupe and verification, diagnosis ranking, web auth, VNC bridge, injector) | `uv run pytest`: 151 pass | Linux and macOS |
+| Unit tests (classifier, OTP extraction, TOTP, approval gate, policy, masking, crypto, dedupe and verification, diagnosis ranking, web auth, VNC bridge, injector) | `uv run pytest`: 159 pass | Linux and macOS |
 | The exact request sent to the Anthropic API | `tests/test_llm_wire.py`: real SDK against a local fake API | Linux and macOS |
 | Persistent profile in a real browser (cookie survives a restart, secret injection, masked screenshot, pinned fingerprint) | `tests/test_chrome_smoke.py`, both `playwright` and `cdp` drivers | macOS with Google Chrome; Linux Xvfb with Playwright's bundled Chromium 141 |
 | Every login scenario against the mock bank (session reuse, email OTP via Gmail stand-in, SMS OTP by owner reply, TOTP, push, wrong password, silent bounce plus diagnosis, access denied, CAPTCHA handoff), statement fetch with verification and dedupe, payment approval gate, navigation allowlist | `tests/test_e2e_mockbank.py`: 12 pass, using a heuristic stand-in for the model | Linux Xvfb with bundled Chromium |
+| Built-in chat: code card resolves the waiting sign-in, approve button clears the gate, cards update in place, phone width | `tests/test_chat.py` plus a scripted browser run against the live server | Linux, bundled Chromium |
 | Docker image: seeding a profile, a second seed of the same profile refused, remote-view login and handoff round trip, no fingerprint warnings | Manual | Docker Desktop on Apple Silicon (x86 image under emulation) |
 
 How to run the real-browser tests on Linux without Google Chrome installed:

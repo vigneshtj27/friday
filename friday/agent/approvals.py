@@ -50,7 +50,7 @@ class Approval:
         }
 
 
-Notify = Callable[[str, str | None], Awaitable[None]]
+Notify = Callable[..., Awaitable[None]]  # (text, url, *, meta)
 
 
 class ApprovalGate:
@@ -83,7 +83,10 @@ class ApprovalGate:
         self._audit.record("approval.request", target=profile_id, approval=a.id, run=run_id, what=action)
         if self.notify:
             try:
-                await self.notify(f"Approval needed for {profile_id}: {action}", self.link(a) if self.link else None)
+                await self.notify(
+                    f"Approval needed for {profile_id}: {action}", self.link(a) if self.link else None,
+                    meta={"kind": "approval", "ref": a.id, "profile_id": profile_id},
+                )  # fmt: skip
             except Exception:
                 pass
         try:

@@ -87,7 +87,7 @@ async def test_approval_gate_approve_deny_expire(ctx):
     gate = ApprovalGate(ctx.db, ctx.audit, ctx.redactor)
     notified = []
 
-    async def notify(text, url):
+    async def notify(text, url, *, meta=None):
         notified.append(text)
 
     gate.notify = notify

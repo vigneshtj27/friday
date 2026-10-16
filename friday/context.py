@@ -11,6 +11,7 @@ from friday.db import Database
 from friday.files import FileStore
 from friday.handoff.manager import HandoffManager
 from friday.login.diagnosis import Diagnoser
+from friday.chat import ChatNotifier, ChatStore
 from friday.notify import MultiNotifier, build_notifier
 from friday.otp.broker import OtpBroker
 from friday.otp.gmail import GmailClient
@@ -44,6 +45,7 @@ class AppContext:
     sitenotes: SiteNotes
     gate: ApprovalGate
     notifier: MultiNotifier
+    chat: ChatNotifier
     gmail: GmailClient
     broker: OtpBroker
     diagnoser: Diagnoser
@@ -72,7 +74,8 @@ def build_context(
     profiles = ProfileManager(settings, db, audit, vault, sites, displays)
     handoffs = HandoffManager(db, audit, base_url=settings.public_base_url, ttl_seconds=settings.handoff_ttl_seconds)
     files = FileStore(settings.data_dir.resolve() / "files", db, cipher, audit)
-    notifier = build_notifier(settings, redactor)
+    chat = ChatNotifier(ChatStore(db, redactor))
+    notifier = build_notifier(settings, redactor, chat)
     gate = ApprovalGate(db, audit, redactor, ttl_seconds=settings.approval_ttl_seconds)
     gmail = GmailClient(
         settings.google_client_id,
@@ -89,7 +92,7 @@ def build_context(
         settings=settings, db=db, cipher=cipher, redactor=redactor, audit=audit, vault=vault,
         injector=SecretInjector(vault, audit), sites=sites, displays=displays, profiles=profiles,
         handoffs=handoffs, supervisor=SessionSupervisor(profiles, handoffs), runs=RunStore(db, redactor),
-        files=files, sitenotes=SiteNotes(db, redactor), gate=gate, notifier=notifier, gmail=gmail,
+        files=files, sitenotes=SiteNotes(db, redactor), gate=gate, notifier=notifier, chat=chat, gmail=gmail,
         broker=broker, diagnoser=diagnoser, transactions=TransactionStore(db),
     )  # fmt: skip
     gate.notify = notifier.send

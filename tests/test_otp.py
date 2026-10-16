@@ -69,7 +69,7 @@ async def test_broker_owner_reply_resolves_and_is_redacted(ctx):
     sent = []
 
     class N:
-        async def send(self, text, url=None):
+        async def send(self, text, url=None, *, meta=None):
             sent.append(text)
 
     broker = OtpBroker(ctx.db, ctx.audit, ctx.vault, ctx.redactor, N(), None, owner_timeout=5)

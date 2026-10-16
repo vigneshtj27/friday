@@ -150,7 +150,10 @@ class JobRunner:
 
         async def request_human(reason: str) -> str:
             h = ctx.handoffs.create(profile.id, reason, op.display.vnc)
-            await ctx.notifier.send(f"{site.name} ({profile.account}) needs you: {reason}", ctx.handoffs.link(h))
+            await ctx.notifier.send(
+                f"{site.name} ({profile.account}) needs you: {reason}", ctx.handoffs.link(h),
+                meta={"kind": "handoff", "ref": h.id, "profile_id": profile.id},
+            )  # fmt: skip
             ctx.runs.step(run_id, "handoff", result=f"{reason} -> {ctx.handoffs.link(h)}")
             state = await ctx.handoffs.wait(h.id)
             return "The owner finished; read the page and continue." if state.value == "done" else f"Handoff {state.value}; finish with status blocked."
@@ -232,7 +235,10 @@ class JobRunner:
                     report_id = ctx.diagnoser.create(profile.id, run_id, login.state.value, login.diagnosis)
                     result["diagnosis_report"] = report_id
                 ctx.runs.finish(run_id, RunStatus.NEEDS_ATTENTION, f"Sign-in did not complete: {login.summary}", result, login.agent.cost_usd if login.agent else 0)
-                await ctx.notifier.send(f"{profile.id}: sign-in needs attention ({login.state}).", ctx.portal_link(f"runs/{run_id}"))
+                await ctx.notifier.send(
+                    f"{profile.id}: sign-in needs attention ({login.state}).", ctx.portal_link(f"runs/{run_id}"),
+                    meta={"kind": "run", "ref": run_id, "profile_id": profile.id},
+                )  # fmt: skip
                 await ex.stop()
                 return report_id
             ctx.profiles.set_status(profile.id, "logged_in")
@@ -242,7 +248,10 @@ class JobRunner:
                 res = await FetchStatement(ctx, llm).run(op, ex, run_id, params)
                 self._save_notes(op.site.id, run_id, res.notes, res.contradicted_notes)
                 ctx.runs.finish(run_id, RunStatus(res.status), res.summary, res.result)
-                await ctx.notifier.send(f"{profile.id}: {res.summary}"[:500], ctx.portal_link(f"runs/{run_id}"))
+                await ctx.notifier.send(
+                    f"{profile.id}: {res.summary}"[:500], ctx.portal_link(f"runs/{run_id}"),
+                    meta={"kind": "run", "ref": run_id, "profile_id": profile.id},
+                )  # fmt: skip
             await ex.stop()
         return report_id
 

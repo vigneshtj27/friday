@@ -159,6 +159,18 @@ MIGRATIONS: list[str] = [
         next_allowed_at TEXT
     );
     """,
+    """
+    CREATE TABLE chat_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        text TEXT NOT NULL,
+        url TEXT,
+        kind TEXT,
+        ref TEXT,
+        profile_id TEXT
+    );
+    """,
 ]
 
 
