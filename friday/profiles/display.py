@@ -110,6 +110,7 @@ class XvfbDisplay(Display):
         self._vnc = await asyncio.create_subprocess_exec(
             "x11vnc", "-display", f":{self.number}", "-localhost", "-rfbport", str(self.vnc_port),
             "-rfbauth", str(passwd_file), "-forever", "-shared", "-noxdamage", "-quiet",
+            "-xkb",  # map keysyms through XKB so Shift and punctuation arrive intact
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )  # fmt: skip
         loop = asyncio.get_running_loop()

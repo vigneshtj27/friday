@@ -58,8 +58,9 @@ const views = {
     $view.innerHTML = card("Accounts", rows ? `<table><tr><th>Account</th><th>Session</th><th>Last run</th><th></th></tr>${rows}</table>` : empty("No profiles. Add a site and a profile on the Sites tab.")) +
       card("Fetch statement", `<div class="row">From <input type="date" id="st-from"> to <input type="date" id="st-to"> <span class="muted">Applies to the "Fetch statement" buttons above.</span></div>`);
     const now = new Date(), first = new Date(now.getFullYear(), now.getMonth() - 1, 1), last = new Date(now.getFullYear(), now.getMonth(), 0);
-    document.getElementById("st-from").value = first.toISOString().slice(0, 10);
-    document.getElementById("st-to").value = last.toISOString().slice(0, 10);
+    const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; // local, not UTC
+    document.getElementById("st-from").value = ymd(first);
+    document.getElementById("st-to").value = ymd(last);
     $view.querySelectorAll("button[data-act]").forEach((b) => b.onclick = () => act(async () => {
       const id = b.dataset.id;
       if (b.dataset.act === "login") { const r = await post(`/api/profiles/${id}/runs`, { kind: "login" }); location.hash = `runs/${r.run_id}`; }
