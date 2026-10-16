@@ -110,6 +110,7 @@ class XvfbDisplay(Display):
         self._vnc = await asyncio.create_subprocess_exec(
             "x11vnc", "-display", f":{self.number}", "-localhost", "-rfbport", str(self.vnc_port),
             "-rfbauth", str(passwd_file), "-forever", "-shared", "-noxdamage", "-quiet",
+            "-xkb",  # map keysyms through XKB so Shift and punctuation arrive intact
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )  # fmt: skip
         loop = asyncio.get_running_loop()
@@ -140,12 +141,16 @@ class DisplayAllocator:
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        backend = settings.display_backend
-        if backend == "auto":
-            backend = "native" if sys.platform == "darwin" else "xvfb"
-        self.backend = backend
         self._in_use: set[int] = set()
         self._lock = asyncio.Lock()
+
+    @property
+    def backend(self) -> str:
+        # Resolved on each use so a settings change takes effect without rebuilding the allocator.
+        backend = self.settings.display_backend
+        if backend == "auto":
+            backend = "native" if sys.platform == "darwin" else "xvfb"
+        return backend
 
     def check_available(self) -> None:
         if self.backend == "xvfb":

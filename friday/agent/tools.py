@@ -20,7 +20,7 @@ from friday.agent.snapshot import ElementInfo, Snapshot, locator_for, take_snaps
 from friday.audit import AuditLog
 from friday.files import FileStore
 from friday.runs import RunStore
-from friday.vault.injector import InjectionRefused, InjectionScope, SecretInjector
+from friday.vault.injector import InjectionRefused, InjectionScope, SecretInjector, type_verified
 from friday.vault.masking import Redactor
 from friday.vault.store import SecretNotFound
 
@@ -385,11 +385,9 @@ class ToolExecutor:
             # Native pickers don't take keystrokes reliably; set the value the way the picker would.
             await loc.fill(text, timeout=10000)
             return ToolResult(f"Set {el.ref} to {text!r}.")
-        await loc.click(timeout=10000)
-        await loc.fill("")
-        for ch in text:
-            await loc.press_sequentially(ch)
-            await asyncio.sleep(self.rng.uniform(40, 120) / 1000 if self.d.action_delay_ms[1] else 0)
+        ok, now = await type_verified(loc, text, lambda: self.rng.uniform(40, 120) / 1000 if self.d.action_delay_ms[1] else 0)
+        if not ok:
+            return ToolResult(f"Typed into {el.ref}, but the field now holds {now!r} instead of {text!r}.")
         return ToolResult(f"Typed into {el.ref}.")
 
     async def _t_press(self, args: dict[str, Any], el: ElementInfo | None) -> ToolResult:

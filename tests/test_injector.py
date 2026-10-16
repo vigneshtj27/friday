@@ -56,6 +56,40 @@ async def test_fill_types_value_and_audits(ctx, injector):
     assert use.details["purpose"] == "fill@login.mybank.example"
 
 
+class DroppingLocator(FakeLocator):
+    """Loses the first `drop` keystrokes of the first attempt, like a freshly committed page."""
+
+    def __init__(self, frame_url: str, drop: int, *, rejects_all: bool = False):
+        super().__init__(frame_url)
+        self.drop, self.rejects_all = drop, rejects_all
+
+    async def press_sequentially(self, text: str, *, delay: float = 0):
+        if self.drop > 0:
+            self.drop -= 1
+            return
+        self.typed += text
+
+    async def fill(self, value: str):
+        self.typed = "" if self.rejects_all else value
+
+    async def input_value(self):
+        return self.typed
+
+
+async def test_fill_retypes_when_keystrokes_are_dropped(ctx, injector):
+    page, loc = FakePage("https://mybank.example/"), DroppingLocator("https://mybank.example/", drop=3)
+    await injector.fill(page, loc, "secret:mybank/me/password", SCOPE)
+    assert loc.typed == "Hunter-2-Strong"
+
+
+async def test_fill_clears_and_refuses_when_field_never_matches(ctx, injector):
+    page, loc = FakePage("https://mybank.example/"), DroppingLocator("https://mybank.example/", drop=10**6, rejects_all=True)
+    with pytest.raises(InjectionRefused, match="did not accept"):
+        await injector.fill(page, loc, "secret:mybank/me/password", SCOPE)
+    assert loc.typed == ""
+    assert "Hunter" not in repr(ctx.audit.list(limit=100))
+
+
 @pytest.mark.parametrize(
     "page_url,frame_url,why",
     [

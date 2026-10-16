@@ -59,6 +59,41 @@ class LocatorLike(Protocol):
     async def press_sequentially(self, text: str, *, delay: float = 0) -> None: ...
 
 
+async def _read_value(locator: Any) -> str | None:
+    try:
+        return await locator.input_value()
+    except Exception:  # contenteditable, detached, or a locator without input_value
+        return None
+
+
+async def type_verified(locator: Any, text: str, delay: Any) -> tuple[bool, str | None]:
+    """Type `text` key by key, then read the field back.
+
+    Chrome started without automation flags drops keystrokes that arrive in the
+    first few hundred milliseconds after a page commits, so a password could
+    silently lose its first characters and burn a login attempt. On a mismatch
+    the field is cleared and retyped once; if two attempts agree the field is
+    deliberately reformatting input (maxlength, separators) and that is accepted;
+    otherwise the value is set directly. Returns (ok, value_now_in_field).
+    """
+    seen: list[str | None] = []
+    for _ in range(2):
+        await locator.click()
+        await locator.fill("")
+        for ch in text:
+            await locator.press_sequentially(ch)
+            await asyncio.sleep(delay())
+        now = await _read_value(locator)
+        if now is None or now == text:
+            return True, now
+        if now and seen and seen[-1] == now:
+            return True, now
+        seen.append(now)
+    await locator.fill(text)
+    now = await _read_value(locator)
+    return now == text, now
+
+
 class SecretInjector:
     def __init__(
         self,
@@ -96,16 +131,22 @@ class SecretInjector:
 
         value = self._store.reveal(ref.name, purpose=f"fill@{host}")
         try:
-            await locator.click()
-            await locator.fill("")
             if human:
-                for ch in value:
-                    await locator.press_sequentially(ch)
-                    await asyncio.sleep(self._rng.uniform(*self._key_delay_ms) / 1000)
+                ok, _ = await type_verified(locator, value, lambda: self._rng.uniform(*self._key_delay_ms) / 1000)
             else:
+                await locator.click()
                 await locator.fill(value)
+                ok = (await _read_value(locator)) in (None, value)
         finally:
             del value
+        if not ok:
+            # Never leave a wrong secret in a field the agent is about to submit.
+            try:
+                await locator.fill("")
+            except Exception:
+                pass
+            self._audit.record("secret.refused", target=ref.name, profile=scope.profile_id, reason="field did not accept the value")
+            raise InjectionRefused(f"the field did not accept {ref} reliably; it was cleared and nothing was submitted")
         try:  # lets page snapshots recognise the field and never show its value
             await locator.evaluate("el => el.setAttribute('data-friday-secret', '1')")
         except Exception:

@@ -26,7 +26,9 @@ class PlaywrightDriver(Driver):
             # sees is what this Chrome genuinely is. Viewport follows the real window.
             context = await pw.chromium.launch_persistent_context(
                 str(req.user_data_dir),
-                channel=req.channel,
+                # An explicit executable (FRIDAY_CHROME_EXECUTABLE) wins over the channel lookup.
+                channel=None if req.executable else req.channel,
+                executable_path=str(req.executable) if req.executable else None,
                 headless=req.headless,
                 # Playwright defaults to --no-sandbox on Linux: a security downgrade and a
                 # visible "unsupported flag" bar no real user has. Keep Chrome's sandbox on.

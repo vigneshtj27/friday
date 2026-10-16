@@ -353,7 +353,7 @@ class ProfileManager:
                     headless=headless,
                     proxy=proxy,
                     channel=channel or self.settings.chrome_channel,
-                    executable=self.settings.chrome_executable,
+                    executable=None if channel else self.settings.chrome_executable,  # an experiment's channel wins
                     sandbox=self.settings.chrome_sandbox,
                 )
             )
