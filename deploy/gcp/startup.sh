@@ -48,6 +48,7 @@ md() { curl -fsS -H "Metadata-Flavor: Google" "http://metadata.google.internal/c
 attr() { md "instance/attributes/$1" 2>/dev/null || true; }
 secret() { gcloud secrets versions access latest --secret="$1" --project="$(md project/project-id)"; }
 APP=/opt/friday/app
+DOMAIN=$(attr friday-domain)
 cd "$APP"
 umask 077
 {
@@ -55,14 +56,27 @@ umask 077
   echo "FRIDAY_ADMIN_PASSWORD_HASH='$(secret rv-fri-admin-password-hash)'"
   echo "ANTHROPIC_API_KEY=$(secret rv-fri-anthropic-api-key)"
   echo "FRIDAY_HOST_DATA=/mnt/friday-data/data"
-  echo "FRIDAY_PUBLIC_BASE_URL=$(attr friday-public-url)"
   echo "FRIDAY_DEFAULT_TIMEZONE=$(attr friday-timezone)"
   echo "FRIDAY_DEFAULT_LOCALE=$(attr friday-locale)"
   echo "TZ=$(attr friday-timezone)"
-  echo "FRIDAY_COOKIE_SECURE=false"
+  if [ -n "$DOMAIN" ]; then
+    echo "FRIDAY_DOMAIN=$DOMAIN"
+    echo "FRIDAY_PUBLIC_BASE_URL=https://$DOMAIN"
+    echo "FRIDAY_COOKIE_SECURE=true"
+    echo "FRIDAY_CADDY_DATA=/mnt/friday-data/caddy"
+  else
+    echo "FRIDAY_PUBLIC_BASE_URL=$(attr friday-public-url)"
+    echo "FRIDAY_COOKIE_SECURE=false"
+  fi
 } > .env.new
 mv .env.new .env
-docker compose up -d --build --remove-orphans
+if [ -n "$DOMAIN" ]; then
+  # Public HTTPS mode: Caddy in front (certificates kept on the data disk).
+  mkdir -p /mnt/friday-data/caddy
+  docker compose -f docker-compose.yml -f deploy/gcp/compose.public.yml up -d --build --remove-orphans
+else
+  docker compose up -d --build --remove-orphans
+fi
 docker image prune -f >/dev/null
 UP
 chmod 755 /usr/local/bin/rv-fri-up

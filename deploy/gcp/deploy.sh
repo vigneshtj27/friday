@@ -5,6 +5,7 @@
 #   deploy/gcp/deploy.sh            # create or update everything, ship the code
 #   deploy/gcp/deploy.sh ship       # only ship the code and restart
 #   deploy/gcp/deploy.sh tunnel     # open the portal at http://127.0.0.1:8765
+#   deploy/gcp/deploy.sh public     # serve the portal on https://<ip>.sslip.io (password-only protection)
 #   deploy/gcp/deploy.sh destroy    # delete everything labelled app=rv-fri (asks first)
 #
 # Every billable resource carries the label app=rv-fri, so Billing reports can
@@ -163,6 +164,41 @@ ship() {
   done
 }
 
+public() {
+  local ip domain
+  ip=$($G compute addresses describe "$IP" --region="$REGION" --format='value(address)')
+  domain="${DOMAIN:-${ip//./-}.sslip.io}"
+  echo "This makes the portal reachable from the whole internet at https://$domain,"
+  echo "protected only by the portal password (with login backoff)."
+  say "Firewall: HTTP/HTTPS from anywhere (Caddy; port 80 is for the certificate challenge and redirects)"
+  exists $G compute firewall-rules describe "$TAG-allow-web" ||
+    $G compute firewall-rules create "$TAG-allow-web" --network="$NET" --direction=INGRESS \
+      --action=allow --rules=tcp:80,tcp:443 --source-ranges=0.0.0.0/0 --target-tags="$TAG" \
+      --description="friday portal over HTTPS (Caddy)"
+  say "Pointing the app at https://$domain"
+  $G compute instances add-metadata "$VM" --zone="$ZONE" \
+    --metadata=friday-domain="$domain",friday-public-url="https://$domain" \
+    --metadata-from-file=startup-script="$HERE/startup.sh"
+  # Re-run the startup script so rv-fri-up learns about public mode.
+  ssh_vm "sudo google_metadata_script_runner startup >/dev/null 2>&1 || true"
+  ship
+  say "Waiting for the certificate"
+  for _ in $(seq 40); do
+    if curl -fsS -o /dev/null "https://$domain/healthz" 2>/dev/null; then echo "  https://$domain is live"; return; fi
+    sleep 6
+  done
+  echo "  not answering yet; Let's Encrypt can take a few minutes. Check: curl -v https://$domain/healthz" >&2
+}
+
+private() {
+  say "Closing public access"
+  $G compute firewall-rules delete "$TAG-allow-web" || true
+  $G compute instances remove-metadata "$VM" --zone="$ZONE" --keys=friday-domain || true
+  $G compute instances add-metadata "$VM" --zone="$ZONE" --metadata=friday-public-url=http://127.0.0.1:8765
+  ssh_vm "sudo docker rm -f app-caddy-1 >/dev/null 2>&1 || true"
+  ship
+}
+
 tunnel() {
   echo "Portal: http://127.0.0.1:8765  (Ctrl+C to close the tunnel)"
   $G compute ssh "$VM" --zone="$ZONE" --tunnel-through-iap -- -N -L 8765:127.0.0.1:8765
@@ -176,6 +212,7 @@ destroy() {
   $G compute disks delete "$DATA_DISK" --zone="$ZONE" || true
   $G compute addresses delete "$IP" --region="$REGION" || true
   $G compute firewall-rules delete "$TAG-allow-iap-ssh" || true
+  $G compute firewall-rules delete "$TAG-allow-web" || true
   $G compute networks subnets delete "$SUBNET" --region="$REGION" || true
   $G compute networks delete "$NET" || true
   for s in "${SECRETS[@]}"; do $G secrets delete "$s" || true; done
@@ -187,6 +224,8 @@ case "${1:-all}" in
        say "Done. Open the portal with: deploy/gcp/deploy.sh tunnel" ;;
   ship) ship ;;
   tunnel) tunnel ;;
+  public) public ;;
+  private) private ;;
   destroy) destroy ;;
-  *) echo "usage: $0 [all|ship|tunnel|destroy]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|ship|tunnel|public|private|destroy]" >&2; exit 2 ;;
 esac

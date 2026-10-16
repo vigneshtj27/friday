@@ -1,0 +1,17 @@
+# Public HTTPS mode (deploy.sh public): Caddy terminates TLS with an automatic
+# Let's Encrypt certificate for $FRIDAY_DOMAIN and proxies to friday.
+# The only thing protecting the portal is the portal password (with login backoff).
+services:
+  caddy:
+    image: caddy:2.8.4
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      FRIDAY_DOMAIN: ${FRIDAY_DOMAIN:?set FRIDAY_DOMAIN}
+    volumes:
+      - ./deploy/gcp/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${FRIDAY_CADDY_DATA:-./caddy-data}:/data
+    depends_on:
+      - friday

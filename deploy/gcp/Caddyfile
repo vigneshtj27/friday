@@ -1,0 +1,9 @@
+{$FRIDAY_DOMAIN} {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	# WebSockets (the remote view) are proxied automatically.
+	reverse_proxy friday:8765
+}

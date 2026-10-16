@@ -52,3 +52,22 @@ Roughly $60–70 a month at on-demand prices, mostly the VM. Stop the VM when yo
 | Remove everything | `deploy/gcp/deploy.sh destroy` |
 
 A datacenter IP is still a datacenter IP: banks may ask for more codes than they would at home. See "Home machine vs VPS" in the main README. If a bank keeps bouncing, run a home `friday egress-proxy` and point the profile's proxy at it.
+
+## Public HTTPS URL (optional)
+
+```bash
+deploy/gcp/deploy.sh public
+```
+
+Serves the portal at `https://<static-ip-with-dashes>.sslip.io` (for 34.14.129.151 that is
+`https://34-14-129-151.sslip.io`) through Caddy with an automatic Let's Encrypt certificate,
+and opens ports 80/443 to the internet. **The portal password is then the only thing between
+the internet and your logged-in bank sessions** (login attempts back off exponentially;
+cookies become `Secure`). Use a long, unique password. Set `DOMAIN=friday.example.com` first
+to use your own domain (point an A record at the static IP).
+
+To go back to tunnel-only access:
+
+```bash
+deploy/gcp/deploy.sh private
+```
