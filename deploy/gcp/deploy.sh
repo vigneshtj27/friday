@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Deploy friday to one Compute Engine VM. Safe to re-run: existing resources are
+# kept, and the app is rebuilt from the current git HEAD.
+#
+#   deploy/gcp/deploy.sh            # create or update everything, ship the code
+#   deploy/gcp/deploy.sh ship       # only ship the code and restart
+#   deploy/gcp/deploy.sh tunnel     # open the portal at http://127.0.0.1:8765
+#   deploy/gcp/deploy.sh destroy    # delete everything labelled app=rv-fri (asks first)
+#
+# Every billable resource carries the label app=rv-fri, so Billing reports can
+# filter on it. Nothing listens on the internet: the only ingress is SSH from
+# Google's IAP range, and the portal is reached through an IAP SSH tunnel.
+#
+# Needs: gcloud authenticated as someone who can administer the project, git,
+# python3. The portal password and the Anthropic key are asked for once
+# (or read from FRIDAY_PORTAL_PASSWORD / ANTHROPIC_API_KEY) and go straight into
+# Secret Manager; they are never printed.
+set -euo pipefail
+
+PROJECT=${PROJECT:-rv-experiments}
+REGION=${REGION:-asia-south1}          # Mumbai: an Indian egress IP, matching Asia/Kolkata
+ZONE=${ZONE:-asia-south1-a}
+MACHINE=${MACHINE:-e2-standard-2}      # 2 vCPU, 8 GB: Chrome plus the app with headroom
+DATA_GB=${DATA_GB:-30}
+TIMEZONE=${TIMEZONE:-Asia/Kolkata}
+LOCALE=${LOCALE:-en-IN}
+TAG=rv-fri
+LABELS="app=$TAG"
+VM=$TAG
+NET=$TAG-net
+SUBNET=$TAG-subnet
+IP=$TAG-ip
+DATA_DISK=$TAG-data
+SA_NAME=$TAG-vm
+SA="$SA_NAME@$PROJECT.iam.gserviceaccount.com"
+SECRETS=(rv-fri-master-key rv-fri-admin-password-hash rv-fri-anthropic-api-key)
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/../.." && pwd)
+G="gcloud --project=$PROJECT --quiet"
+
+say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+exists() { "$@" >/dev/null 2>&1; }
+
+ssh_vm() { $G compute ssh "$VM" --zone="$ZONE" --tunnel-through-iap -- "$@"; }
+
+ensure_apis() {
+  say "Enabling APIs"
+  $G services enable compute.googleapis.com secretmanager.googleapis.com iap.googleapis.com
+}
+
+ensure_network() {
+  say "Network $NET (IAP SSH only)"
+  exists $G compute networks describe "$NET" || $G compute networks create "$NET" --subnet-mode=custom
+  exists $G compute networks subnets describe "$SUBNET" --region="$REGION" ||
+    $G compute networks subnets create "$SUBNET" --network="$NET" --region="$REGION" --range=10.88.0.0/24 \
+      --enable-private-ip-google-access
+  exists $G compute firewall-rules describe "$TAG-allow-iap-ssh" ||
+    $G compute firewall-rules create "$TAG-allow-iap-ssh" --network="$NET" --direction=INGRESS \
+      --action=allow --rules=tcp:22 --source-ranges=35.235.240.0/20 --target-tags="$TAG" \
+      --description="SSH (and the portal tunnel) through Identity-Aware Proxy only"
+  say "Static IP $IP (a stable egress address banks can get used to)"
+  exists $G compute addresses describe "$IP" --region="$REGION" ||
+    $G compute addresses create "$IP" --region="$REGION" --network-tier=PREMIUM
+  $G compute addresses update "$IP" --region="$REGION" --update-labels="$LABELS"
+}
+
+ensure_service_account() {
+  say "Service account $SA"
+  exists $G iam service-accounts describe "$SA" ||
+    $G iam service-accounts create "$SA_NAME" --display-name="friday VM ($TAG)"
+  for role in roles/logging.logWriter roles/monitoring.metricWriter; do
+    $G projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA" --role="$role" \
+      --condition=None >/dev/null
+  done
+}
+
+put_secret() {  # name, value on stdin
+  local name=$1
+  if ! exists $G secrets describe "$name"; then
+    $G secrets create "$name" --replication-policy=user-managed --locations="$REGION" --labels="$LABELS"
+  fi
+  $G secrets versions add "$name" --data-file=- >/dev/null
+}
+
+ensure_secrets() {
+  say "Secrets in Secret Manager"
+  cd "$ROOT"
+  if ! exists $G secrets versions access latest --secret=rv-fri-master-key; then
+    python3 -c 'import base64,os;print(base64.b64encode(os.urandom(32)).decode(),end="")' | put_secret rv-fri-master-key
+    echo "  created rv-fri-master-key (back it up: gcloud secrets versions access latest --secret=rv-fri-master-key)"
+  fi
+  if ! exists $G secrets versions access latest --secret=rv-fri-admin-password-hash; then
+    local pw=${FRIDAY_PORTAL_PASSWORD:-}
+    if [ -z "$pw" ]; then
+      read -rsp "  Choose a portal password (12+ characters): " pw; echo
+    fi
+    [ ${#pw} -ge 12 ] || { echo "  too short" >&2; exit 1; }
+    FRIDAY_PW="$pw" uv run --quiet python -c \
+      'import os,sys; from friday.web.auth import hash_password; sys.stdout.write(hash_password(os.environ["FRIDAY_PW"]))' |
+      put_secret rv-fri-admin-password-hash
+    echo "  stored the portal password hash"
+  fi
+  if ! exists $G secrets versions access latest --secret=rv-fri-anthropic-api-key; then
+    local key=${ANTHROPIC_API_KEY:-}
+    if [ -z "$key" ]; then
+      read -rsp "  Anthropic API key: " key; echo
+    fi
+    printf '%s' "$key" | put_secret rv-fri-anthropic-api-key
+    echo "  stored the Anthropic API key"
+  fi
+  for s in "${SECRETS[@]}"; do
+    $G secrets add-iam-policy-binding "$s" --member="serviceAccount:$SA" \
+      --role=roles/secretmanager.secretAccessor >/dev/null
+  done
+}
+
+ensure_vm() {
+  say "Data disk $DATA_DISK (${DATA_GB} GB, survives VM rebuilds)"
+  exists $G compute disks describe "$DATA_DISK" --zone="$ZONE" ||
+    $G compute disks create "$DATA_DISK" --zone="$ZONE" --size="${DATA_GB}GB" --type=pd-balanced --labels="$LABELS"
+
+  say "VM $VM ($MACHINE in $ZONE)"
+  if ! exists $G compute instances describe "$VM" --zone="$ZONE"; then
+    $G compute instances create "$VM" --zone="$ZONE" --machine-type="$MACHINE" \
+      --network-interface="subnet=$SUBNET,address=$IP,network-tier=PREMIUM" \
+      --image-family=debian-12 --image-project=debian-cloud \
+      --boot-disk-size=30GB --boot-disk-type=pd-balanced --boot-disk-device-name="$TAG-boot" \
+      --disk="name=$DATA_DISK,device-name=friday-data,mode=rw,auto-delete=no" \
+      --service-account="$SA" --scopes=cloud-platform \
+      --tags="$TAG" --labels="$LABELS" \
+      --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
+      --metadata=enable-oslogin=TRUE,friday-timezone="$TIMEZONE",friday-locale="$LOCALE",friday-public-url=http://127.0.0.1:8765 \
+      --metadata-from-file=startup-script="$HERE/startup.sh"
+  else
+    $G compute instances add-metadata "$VM" --zone="$ZONE" --metadata-from-file=startup-script="$HERE/startup.sh"
+  fi
+  # Instance labels do not flow to its disks; label the boot disk explicitly.
+  $G compute disks add-labels "$VM" --zone="$ZONE" --labels="$LABELS"
+
+  say "Waiting for first-boot setup (Docker, data disk)"
+  for _ in $(seq 60); do
+    if ssh_vm "test -f /var/lib/rv-fri-ready" 2>/dev/null; then echo "  ready"; return; fi
+    sleep 10
+  done
+  echo "  timed out; check: gcloud compute ssh $VM --zone=$ZONE --tunnel-through-iap -- sudo tail /var/log/rv-fri-startup.log" >&2
+  exit 1
+}
+
+ship() {
+  say "Shipping $(git -C "$ROOT" rev-parse --short HEAD) and starting friday (the first build takes a few minutes)"
+  local tgz
+  tgz=$(mktemp -t friday-XXXX.tgz)
+  git -C "$ROOT" archive --format=tar.gz -o "$tgz" HEAD
+  $G compute scp "$tgz" "$VM:/tmp/friday.tgz" --zone="$ZONE" --tunnel-through-iap
+  rm -f "$tgz"
+  ssh_vm "sudo bash -c 'rm -rf /opt/friday/app.new && mkdir -p /opt/friday/app.new && tar -xzf /tmp/friday.tgz -C /opt/friday/app.new \
+    && rm -rf /opt/friday/app.old && { [ ! -d /opt/friday/app ] || mv /opt/friday/app /opt/friday/app.old; } \
+    && mv /opt/friday/app.new /opt/friday/app && rm /tmp/friday.tgz && /usr/local/bin/rv-fri-up'"
+  say "Health"
+  for _ in $(seq 30); do
+    if ssh_vm "curl -fsS http://127.0.0.1:8765/healthz" 2>/dev/null; then echo; break; fi
+    sleep 5
+  done
+}
+
+tunnel() {
+  echo "Portal: http://127.0.0.1:8765  (Ctrl+C to close the tunnel)"
+  $G compute ssh "$VM" --zone="$ZONE" --tunnel-through-iap -- -N -L 8765:127.0.0.1:8765
+}
+
+destroy() {
+  echo "This deletes the VM, its disks (including all browser profiles and statements), the IP, the network and the secrets."
+  read -rp "Type rv-fri to confirm: " ok
+  [ "$ok" = "$TAG" ] || exit 1
+  $G compute instances delete "$VM" --zone="$ZONE" || true
+  $G compute disks delete "$DATA_DISK" --zone="$ZONE" || true
+  $G compute addresses delete "$IP" --region="$REGION" || true
+  $G compute firewall-rules delete "$TAG-allow-iap-ssh" || true
+  $G compute networks subnets delete "$SUBNET" --region="$REGION" || true
+  $G compute networks delete "$NET" || true
+  for s in "${SECRETS[@]}"; do $G secrets delete "$s" || true; done
+  $G iam service-accounts delete "$SA" || true
+}
+
+case "${1:-all}" in
+  all) ensure_apis; ensure_network; ensure_service_account; ensure_secrets; ensure_vm; ship
+       say "Done. Open the portal with: deploy/gcp/deploy.sh tunnel" ;;
+  ship) ship ;;
+  tunnel) tunnel ;;
+  destroy) destroy ;;
+  *) echo "usage: $0 [all|ship|tunnel|destroy]" >&2; exit 2 ;;
+esac

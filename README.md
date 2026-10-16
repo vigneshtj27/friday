@@ -146,6 +146,10 @@ The image contains Google Chrome (amd64; it runs under emulation on Apple Silico
 
 For the first-run profile seeding on a server, use **Manual login** in the portal: the remote view shows the server's Chrome in your browser.
 
+### Google Cloud
+
+`deploy/gcp/deploy.sh` creates a locked-down VM in `rv-experiments` (all resources labelled `app=rv-fri`). See [`deploy/gcp/README.md`](deploy/gcp/README.md).
+
 ### Home machine vs VPS: the IP-reputation tradeoff
 
 Banks score logins by network as well as by browser. A **VPS** has a datacenter IP: often flagged as hosting, sometimes in another country, shared with other customers' traffic. That means more "unusual activity" blocks, silent bounces and extra OTPs. A **home machine** has your usual residential IP and timezone, which is exactly what the bank has seen for years.
