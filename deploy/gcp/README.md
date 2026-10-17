@@ -71,3 +71,50 @@ To go back to tunnel-only access:
 ```bash
 deploy/gcp/deploy.sh private
 ```
+
+## Push to deploy (Cloud Build)
+
+A push to the chosen branch on GitHub deploys that commit to the VM. Cloud Build runs
+[`cloudbuild.yaml`](../../cloudbuild.yaml), which runs `deploy/gcp/deploy.sh ship`: tar the
+commit, copy it over an IAP SSH tunnel, swap `/opt/friday/app`, run `rv-fri-up`, and fail the
+build if `/healthz` doesn't answer within 150 s. No GitHub Actions, and the build never sees the
+app's secrets (the VM reads them from Secret Manager as before).
+
+Set it up once, with your own gcloud login, naming the branch whose pushes should deploy:
+
+```bash
+deploy/gcp/setup-cloudbuild.sh main-c3c2du
+```
+
+**The one manual step.** On the first run the script creates the GitHub connection
+`rv-fri-github` and stops with a URL. Open it, sign in to GitHub as the owner of
+`vigneshtj27/friday`, authorize Cloud Build and install the Cloud Build GitHub app on that
+repository (you can do the same from Console → Cloud Build → Repositories → 2nd gen →
+`rv-fri-github`). Then run the script again; it links the repo and creates the trigger.
+Re-running it later is safe, and running it with another branch moves the trigger there.
+
+What it creates (all free):
+
+| Resource | Name |
+|---|---|
+| Deploy service account: IAP tunnel to port 22, OS Admin Login on `rv-fri` only, Service Account User on `rv-fri-vm`, `compute.instances.get`/`compute.projects.get` (custom role `rvFriDeployer`), log writer. No secret access. | `rv-fri-deployer` |
+| 2nd-gen GitHub connection and repository link, in `asia-south1` | `rv-fri-github` / `friday` |
+| Trigger: push to the branch → `cloudbuild.yaml`, run as `rv-fri-deployer` | `rv-fri-deploy` |
+
+The branch has to contain `cloudbuild.yaml`, so merge this into it before relying on the trigger.
+
+Watch builds:
+
+| Task | Command |
+|---|---|
+| Builds in the console | https://console.cloud.google.com/cloud-build/builds;region=asia-south1?project=rv-experiments |
+| Recent builds | `gcloud builds list --region=asia-south1 --project=rv-experiments --limit=5` |
+| Follow one | `gcloud builds log --stream BUILD_ID --region=asia-south1 --project=rv-experiments` |
+| Deploy without pushing | `gcloud builds triggers run rv-fri-deploy --region=asia-south1 --branch=main-c3c2du --project=rv-experiments` |
+
+**Builds don't overlap on the VM.** Cloud Build itself will run two builds at once if you push
+twice quickly, but `deploy.sh ship` takes a lock (`flock /var/lock/rv-fri-deploy`) on the VM
+around the swap and restart, so the second waits for the first (up to 15 minutes). The same lock
+covers a manual `deploy/gcp/deploy.sh ship` from your laptop. Builds start in push order, so
+the last push normally lands last; if in doubt, check `git rev-parse HEAD` against the build's
+commit, or run the trigger again.

@@ -148,20 +148,32 @@ ensure_vm() {
 }
 
 ship() {
-  say "Shipping $(git -C "$ROOT" rev-parse --short HEAD) and starting friday (the first build takes a few minutes)"
-  local tgz
-  tgz=$(mktemp -t friday-XXXX.tgz)
-  git -C "$ROOT" archive --format=tar.gz -o "$tgz" HEAD
-  $G compute scp "$tgz" "$VM:/tmp/friday.tgz" --zone="$ZONE" --tunnel-through-iap
+  # Also runs unattended from Cloud Build (cloudbuild.yaml), where the source may
+  # arrive without .git: then COMMIT_SHA names it and the tree is tarred as is.
+  local rev tgz remote
+  rev=${COMMIT_SHA:-$(git -C "$ROOT" rev-parse HEAD)}
+  rev=${rev:0:7}
+  say "Shipping $rev and starting friday (the first build takes a few minutes)"
+  tgz=$(mktemp "${TMPDIR:-/tmp}/friday-XXXXXX")
+  if git -C "$ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    git -C "$ROOT" archive --format=tar.gz -o "$tgz" HEAD
+  else
+    tar -czf "$tgz" -C "$ROOT" --exclude=./.git .
+  fi
+  remote="/tmp/friday-$rev-$RANDOM.tgz"
+  $G compute scp "$tgz" "$VM:$remote" --zone="$ZONE" --tunnel-through-iap
   rm -f "$tgz"
-  ssh_vm "sudo bash -c 'rm -rf /opt/friday/app.new && mkdir -p /opt/friday/app.new && tar -xzf /tmp/friday.tgz -C /opt/friday/app.new \
+  # flock: a push-triggered build and a manual ship never swap the app dir at once.
+  ssh_vm "sudo flock -w 900 /var/lock/rv-fri-deploy bash -c 'rm -rf /opt/friday/app.new && mkdir -p /opt/friday/app.new && tar -xzf $remote -C /opt/friday/app.new \
     && rm -rf /opt/friday/app.old && { [ ! -d /opt/friday/app ] || mv /opt/friday/app /opt/friday/app.old; } \
-    && mv /opt/friday/app.new /opt/friday/app && rm /tmp/friday.tgz && /usr/local/bin/rv-fri-up'"
+    && mv /opt/friday/app.new /opt/friday/app && rm $remote && /usr/local/bin/rv-fri-up'"
   say "Health"
   for _ in $(seq 30); do
-    if ssh_vm "curl -fsS http://127.0.0.1:8765/healthz" 2>/dev/null; then echo; break; fi
+    if ssh_vm "curl -fsS http://127.0.0.1:8765/healthz" 2>/dev/null; then echo; return; fi
     sleep 5
   done
+  echo "  friday did not answer on 127.0.0.1:8765/healthz within 150s" >&2
+  exit 1
 }
 
 public() {

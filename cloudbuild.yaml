@@ -1,0 +1,21 @@
+# Push-to-deploy: a Cloud Build trigger (set up by deploy/gcp/setup-cloudbuild.sh)
+# runs this on every push to the chosen branch. It does exactly what
+# `deploy/gcp/deploy.sh ship` does from a laptop: tar the pushed commit, copy it
+# to the rv-fri VM over an IAP SSH tunnel, swap /opt/friday/app, run rv-fri-up
+# and wait for /healthz. App secrets stay in Secret Manager and are read on the
+# VM, so this build never sees them.
+#
+# Overlap: deploy.sh holds a flock on the VM while it swaps the app directory and
+# restarts, so two builds (or a build and a manual ship) run one after the other.
+steps:
+  - id: ship
+    name: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
+    entrypoint: bash
+    args: ["deploy/gcp/deploy.sh", "ship"]
+    env:
+      - COMMIT_SHA=$COMMIT_SHA
+      - PROJECT=$PROJECT_ID
+timeout: 1800s
+options:
+  # Required when the build runs as a user-specified service account.
+  logging: CLOUD_LOGGING_ONLY
