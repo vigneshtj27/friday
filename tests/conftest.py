@@ -27,7 +27,7 @@ def settings(tmp_path) -> Settings:
 
 @pytest.fixture
 def ctx(settings) -> AppContext:
-    c = build_context(settings, master_key=TEST_KEY, redactor=Redactor())
+    c = build_context(settings, master_key=TEST_KEY, redactor=Redactor(), chat_llm_factory=False)
     c.sites.upsert(Site(id="mybank", name="My Bank", login_url="https://login.mybank.example/", domains=["mybank.example"]))
     yield c
     c.db.close()

@@ -12,6 +12,7 @@ like one, is kept masked.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from typing import Any
 
@@ -20,16 +21,28 @@ from friday.notify import Notifier, ReplyHandler
 from friday.util import iso
 from friday.vault.masking import Redactor
 
+log = logging.getLogger(__name__)
+
 CARD_KINDS = ("otp", "approval", "handoff", "run")
-_CODEISH = re.compile(r"(?<![\w-])[A-Za-z0-9]{0,2}\d[\d\s-]{2,10}\d(?![\w-])")
+# A whole message that is just a code ("284113", "284 113", "G-482913").
+_CODE_MESSAGE = re.compile(r"[A-Za-z]{0,2}-?\d[\d -]{2,10}\d")
+# Code-like numbers inside a sentence: 5-8 digits, or 3+3 digits. Dates, years, amounts with
+# separators (12,480.00) and card endings (4417) stay readable.
+_CODE_IN_TEXT = re.compile(r"(?<![\w.,/:-])(?:\d{5,8}|\d{3} \d{3})(?![\w.,/:-])")
 HELP = (
     "I post here whenever a run needs you: a one-time code, an approval, or a step only you can do in the browser. "
     "Reply with just the code when I ask for one. Type \"status\" to see what is waiting."
 )
 
 
+def looks_like_code(text: str) -> bool:
+    return bool(_CODE_MESSAGE.fullmatch(text.strip()))
+
+
 def mask_codes(text: str) -> str:
-    return _CODEISH.sub(lambda m: "•" * min(len(m.group(0).replace(" ", "")), 8), text)
+    if looks_like_code(text):
+        return "•" * min(len(text.strip().replace(" ", "")), 8)
+    return _CODE_IN_TEXT.sub(lambda m: "•" * len(m.group(0).replace(" ", "")), text)
 
 
 class ChatStore:
@@ -70,6 +83,9 @@ class ChatStore:
         rows = self._db.query("SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?", (limit,))
         return [dict(r) for r in reversed(rows)]
 
+    def has_card(self, kind: str, ref: str) -> bool:
+        return self._db.query_one("SELECT 1 FROM chat_messages WHERE kind = ? AND ref = ? LIMIT 1", (kind, ref)) is not None
+
     def has_before(self, msg_id: int) -> bool:
         return self._db.query_one("SELECT 1 FROM chat_messages WHERE id < ? LIMIT 1", (msg_id,)) is not None
 
@@ -100,34 +116,59 @@ class ChatNotifier(Notifier):
     def __init__(self, store: ChatStore):
         self.store = store
         self._on_reply: ReplyHandler | None = None
+        self.assistant: Any = None  # friday.assistant.ChatAssistant, set by the app context
+        self._tasks: set[asyncio.Task[None]] = set()
 
     async def send(self, text: str, url: str | None = None, *, meta: dict[str, Any] | None = None) -> None:
         meta = meta or {}
-        self.store.add(
-            "friday", text, url=url, kind=meta.get("kind"), ref=meta.get("ref"), profile_id=meta.get("profile_id")
-        )
+        kind, ref = meta.get("kind"), meta.get("ref")
+        if kind and ref and self.store.has_card(kind, ref):
+            kind = ref = None  # the card already in the chat updates live; this is just the news
+        self.store.add("friday", text, url=url, kind=kind, ref=ref, profile_id=meta.get("profile_id"))
 
     async def start(self, on_reply: ReplyHandler) -> None:
         self._on_reply = on_reply
 
     async def owner_says(self, text: str, status: Any = None) -> dict[str, Any]:
-        """Store the owner's message and act on it. `status` returns a one-line summary for "status"."""
+        """Store the owner's message and act on it.
+
+        A code goes to the waiting sign-in and never reaches the model. Anything else goes to the
+        assistant, which answers in the background (the page shows it typing). Without an
+        assistant, a few fixed replies cover "status" and "help". `status` gives the one-line summary.
+        """
         text = text.strip()
         handled = bool(self._on_reply) and await self._on_reply(text, "chat")  # type: ignore[misc]
-        mine = self.store.add("owner", "•" * min(max(len(text), 4), 8) if handled else mask_codes(text))
-        word = text.lower().strip(" ?!.")
         if handled:
+            mine = self.store.add("owner", "•" * min(max(len(text), 4), 8))
             self.store.add("friday", "Got it. The code went to the sign-in.")
-        elif word in ("status", "what's waiting", "whats waiting", "pending") and status:
-            self.store.add("friday", status())
-        elif word in ("help", "hi", "hello", "hey", "?"):
-            self.store.add("friday", HELP)
-        elif _CODEISH.fullmatch(text):
+            return mine
+        mine = self.store.add("owner", mask_codes(text))
+        if looks_like_code(text):
             self.store.add("friday", "Nothing is waiting for a code right now, so I discarded that.")
+        elif self.assistant is not None:
+            task = asyncio.create_task(self._answer(text))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
         else:
-            self.store.add(
-                "friday",
-                "I can't act on free text yet. I take a code when I ask for one, and the cards handle approvals "
-                "and handoffs. Type \"status\" to see what is waiting.",
-            )
+            self.store.add("friday", self._fixed_reply(text, status))
         return mine
+
+    async def _answer(self, text: str) -> None:
+        try:
+            reply = await self.assistant.reply(text)  # type: ignore[union-attr]
+        except Exception as e:
+            log.warning("chat assistant failed: %s: %s", type(e).__name__, e)
+            reply = "Sorry, I couldn't reach the model just now. Try again in a moment; codes and the cards still work."
+        self.store.add("friday", reply)
+
+    @staticmethod
+    def _fixed_reply(text: str, status: Any) -> str:
+        word = text.lower().strip(" ?!.")
+        if word in ("status", "what's waiting", "whats waiting", "pending") and status:
+            return status()
+        if word in ("help", "hi", "hello", "hey", "?"):
+            return HELP
+        return (
+            "Free-text requests need the model, which isn't configured (set ANTHROPIC_API_KEY). Codes and the "
+            "cards still work. Type \"status\" to see what is waiting."
+        )

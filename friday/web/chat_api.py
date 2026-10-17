@@ -40,12 +40,16 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
     store = ctx.chat.store
     deps = [require]
 
+    def typing() -> bool:
+        return bool(ctx.chat.assistant and ctx.chat.assistant.busy)
+
     def signature() -> str:
         live = [
             sorted(r.id for r in ctx.broker.pending()),
             sorted(a.id for a in ctx.gate.pending()),
             sorted(h.id for h in ctx.handoffs.list_open()),
             sorted(ctx.jobs.active()) if ctx.jobs else [],
+            typing(),
         ]
         return hashlib.sha256(json.dumps(live).encode()).hexdigest()[:16]
 
@@ -78,7 +82,8 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
             r = ctx.runs.get(ref)
             if r is None:
                 return None
-            return {"status": r["status"], "kind": r["kind"], "summary": r["summary"], "link": f"/portal#runs/{ref}"}
+            return {"status": r["status"], "kind": r["kind"], "summary": r["summary"], "goal": (r["params"] or {}).get("goal"),
+                    "start": (r["params"] or {}).get("start"), "end": (r["params"] or {}).get("end"), "link": f"/portal#runs/{ref}"}  # fmt: skip
         return None
 
     def cards_for(messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -127,6 +132,7 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
             "cards": cards_for(window),
             "last_id": store.last_id(),
             "sig": signature(),
+            "typing": typing(),
             "has_more": bool(messages) and not after and store.has_before(messages[0]["id"]),
         }
 

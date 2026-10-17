@@ -41,7 +41,7 @@ def ectx(tmp_path):
         action_delay_ms=(0, 0), site_min_login_interval_seconds=0, otp_timeout_seconds=20,
         public_base_url="http://testserver", geoip_url=None,
     )  # fmt: skip
-    ctx = build_context(s, master_key=TEST_KEY, redactor=Redactor(), llm_factory=lambda: HeuristicLLM(dates=("2026-03-01", "2026-03-31")))
+    ctx = build_context(s, master_key=TEST_KEY, redactor=Redactor(), llm_factory=lambda: HeuristicLLM(dates=("2026-03-01", "2026-03-31")), chat_llm_factory=False)
     ctx.test_llm = llm
     yield ctx
     ctx.db.close()

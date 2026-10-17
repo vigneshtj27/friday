@@ -62,6 +62,7 @@ def build_context(
     master_key: bytes | None = None,
     redactor: Redactor = REDACTOR,
     llm_factory: Any = None,
+    chat_llm_factory: Any = None,  # False: no assistant (fixed replies only)
 ) -> AppContext:
     settings = settings or get_settings()
     settings.check_safe_environment()
@@ -104,4 +105,14 @@ def build_context(
 
         llm_factory = lambda: default_llm(settings)  # noqa: E731
     ctx.jobs = JobRunner(ctx, llm_factory)
+    if chat_llm_factory is None:
+        from friday.agent.llm import AnthropicLLM
+
+        chat_llm_factory = lambda: AnthropicLLM(  # noqa: E731
+            settings.model, effort=settings.chat_effort, fallbacks=settings.model_fallbacks
+        )
+    if chat_llm_factory is not False:
+        from friday.assistant import ChatAssistant
+
+        chat.assistant = ChatAssistant(ctx, chat_llm_factory)
     return ctx

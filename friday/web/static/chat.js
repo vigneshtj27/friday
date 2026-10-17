@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 const thread = $("thread"), scroller = $("scroller"), input = $("input"), sendBtn = $("send");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-const state = { messages: [], cards: {}, lastId: 0, sig: "", hasMore: false, loaded: false, unread: 0, cardAt: {} };
+const state = { messages: [], cards: {}, lastId: 0, sig: "", hasMore: false, loaded: false, unread: 0, cardAt: {}, typing: false };
 
 // ---- http ---------------------------------------------------------------
 
@@ -110,9 +110,12 @@ function cardHTML(m) {
     </div>`;
   }
   if (m.kind === "run") {
-    const title = { fetch_statement: "Statement fetch", login: "Sign-in" }[c.kind] || "Run";
+    const title = { fetch_statement: "Statement fetch", login: "Sign-in", task: "Task" }[c.kind] || "Run";
+    const what = c.kind === "task" ? c.goal : c.kind === "fetch_statement" && c.start ? `${c.start} to ${c.end}` : "";
+    const busy = c.status === "running" || c.status === "queued";
     return head(title, acct) + `<div class="card-main">
-      ${c.summary ? `<p>${esc(c.summary)}</p>` : ""}
+      ${what ? `<p class="card-sub">${esc(what)}</p>` : ""}
+      ${c.summary ? `<p>${esc(c.summary)}</p>` : busy ? `<p class="card-sub working">Working in the browser<span class="dots"><i></i><i></i><i></i></span></p>` : ""}
       <a class="btn" href="${esc(c.link)}">View run</a></div>`;
   }
   return "";
@@ -133,9 +136,14 @@ function msgHTML(m, prev, next) {
   return `${day}<div class="${cls}" data-id="${m.id}">${gutter}<div class="body">${text}${card}${meta}</div></div>`;
 }
 
+function typingHTML() {
+  return `<div class="msg friday first last" id="typing"><div class="gutter"><div class="mark sm">f</div></div>
+    <div class="body"><div class="typing" aria-label="friday is typing"><i></i><i></i><i></i></div></div></div>`;
+}
+
 function render() {
   const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
-  if (!state.messages.length) {
+  if (!state.messages.length && !state.typing) {
     thread.innerHTML = state.loaded ? `<div class="empty"><div class="mark">f</div><h2>All quiet</h2>
       <p>When a run needs a code, an approval or your hand in the browser, it shows up here.</p></div>` : "";
     return;
@@ -144,7 +152,8 @@ function render() {
   const typed = {}, focused = document.activeElement?.closest?.("[data-otp]")?.dataset.otp;
   thread.querySelectorAll("[data-otp]").forEach((f) => { if (f.code.value) typed[f.dataset.otp] = f.code.value; });
   thread.innerHTML = (state.hasMore ? `<div class="older"><button class="pill-btn" id="older">Show earlier messages</button></div>` : "")
-    + ms.map((m, i) => msgHTML(m, ms[i - 1], ms[i + 1])).join("");
+    + ms.map((m, i) => msgHTML(m, ms[i - 1], ms[i + 1])).join("")
+    + (state.typing ? typingHTML() : "");
   thread.querySelectorAll("[data-otp]").forEach((f) => {
     if (typed[f.dataset.otp]) f.code.value = typed[f.dataset.otp];
     if (f.dataset.otp === focused) f.code.focus({ preventScroll: true });
@@ -211,11 +220,13 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) { st
 function absorb(data, { initial = false } = {}) {
   mergeCards(data.cards);
   state.sig = data.sig;
+  const typingChanged = !!data.typing !== state.typing;
+  state.typing = !!data.typing;
   const fresh = (data.messages || []).filter((m) => m.id > state.lastId);
   if (initial) { state.messages = data.messages; state.hasMore = data.has_more; }
   else if (fresh.length) state.messages.push(...fresh);
   state.lastId = Math.max(state.lastId, data.last_id || 0, ...state.messages.map((m) => m.id));
-  if (initial || fresh.length) render();
+  if (initial || fresh.length || typingChanged) render();
   refreshCards();
   if (!initial) announce(fresh);
 }

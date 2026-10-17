@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     model: str = "claude-opus-5-5"
     model_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     model_fallbacks: bool = True
+    chat_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"  # the chat assistant: quick replies
 
     # agent limits and pacing
     max_steps: int = 40

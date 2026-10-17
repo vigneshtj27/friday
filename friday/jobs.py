@@ -14,6 +14,7 @@ from friday.agent.policy import ActionPolicy, PolicyContext
 from friday.agent.recorder import PageRecorder
 from friday.agent.tools import ExecutorDeps, Services, ToolExecutor
 from friday.capabilities.statement import FetchStatement
+from friday.capabilities.task import OwnerTask
 from friday.login.classifier import LoginState
 from friday.login.engine import LoginEngine, LoginServices
 from friday.runs import RunStatus
@@ -22,7 +23,7 @@ from friday.vault.injector import InjectionScope
 
 log = logging.getLogger(__name__)
 
-KINDS = {"login", "fetch_statement", "diagnose_probes", "diagnose_manual"}
+KINDS = {"login", "fetch_statement", "task", "diagnose_probes", "diagnose_manual"}
 FAILURE_STATES = {
     LoginState.SILENT_BOUNCE, LoginState.ACCESS_DENIED_OR_BLOCKED, LoginState.CREDENTIALS_REJECTED,
     LoginState.CAPTCHA, LoginState.PAGE_FAILED,
@@ -79,9 +80,11 @@ class JobRunner:
         profile = self.ctx.profiles.get(profile_id)
         if kind == "fetch_statement":
             params = FetchStatement.validate(params)
+        if kind == "task":
+            params = OwnerTask.validate(params)
         if kind in ("diagnose_probes", "diagnose_manual") and not params.get("report_id"):
             raise ValueError("report_id is required")
-        if kind in ("login", "fetch_statement") and not force:
+        if kind in ("login", "fetch_statement", "task") and not force:
             self._check_backoff(profile.site_id)
         run_id = self.ctx.runs.create(kind, profile_id, params)
         self.ctx.audit.record("job.submit", actor="admin", target=profile_id, run=run_id, kind=kind)
@@ -244,8 +247,9 @@ class JobRunner:
             ctx.profiles.set_status(profile.id, "logged_in")
             if kind == "login":
                 ctx.runs.finish(run_id, RunStatus.SUCCEEDED, login.summary, {"reused_session": login.reused_session})
-            elif kind == "fetch_statement":
-                res = await FetchStatement(ctx, llm).run(op, ex, run_id, params)
+            elif kind in ("fetch_statement", "task"):
+                cap = FetchStatement(ctx, llm) if kind == "fetch_statement" else OwnerTask(ctx, llm)
+                res = await cap.run(op, ex, run_id, params)
                 self._save_notes(op.site.id, run_id, res.notes, res.contradicted_notes)
                 ctx.runs.finish(run_id, RunStatus(res.status), res.summary, res.result)
                 await ctx.notifier.send(
