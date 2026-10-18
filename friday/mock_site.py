@@ -22,7 +22,10 @@ from friday.otp.totp import totp
 USERNAME = "alice"
 PASSWORD = "correct-horse-battery"
 MOCK_TOTP_SEED = "JBSWY3DPEHPK3PXP"
-SCENARIOS = {"normal", "email_otp", "sms_otp", "totp", "push", "bounce", "denied", "captcha"}
+SCENARIOS = {"normal", "email_otp", "sms_otp", "totp", "push", "bounce", "denied", "captcha", "hardened"}
+# "hardened": every page disables eval/Function the way some banks (e.g. American Express) do.
+HARDEN_JS = ("<script>(()=>{const no=()=>{throw new Error('eval is disabled')};"
+             "window.eval=no;window.Function=function(){no()};})()</script>")
 
 
 def _transactions() -> list[dict]:
@@ -80,6 +83,15 @@ def create_mock_app() -> FastAPI:
     sessions: dict[str, dict] = {}  # token -> {scenario, stage, code, created}
     outbox: list[dict] = []
     transfers: list[dict] = []
+
+    @app.middleware("http")
+    async def harden(request: Request, call_next):
+        resp = await call_next(request)
+        if request.url.path.startswith("/s/hardened/") and resp.headers.get("content-type", "").startswith("text/html"):
+            body = b"".join([c async for c in resp.body_iterator]).replace(b"<head>", b"<head>" + HARDEN_JS.encode(), 1)
+            headers = {k: v for k, v in resp.headers.items() if k.lower() != "content-length"}
+            return Response(body, status_code=resp.status_code, headers=headers)
+        return resp
 
     def page(title: str, body: str, status: int = 200) -> HTMLResponse:
         return HTMLResponse(

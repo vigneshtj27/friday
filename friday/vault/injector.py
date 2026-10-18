@@ -59,6 +59,18 @@ class LocatorLike(Protocol):
     async def press_sequentially(self, text: str, *, delay: float = 0) -> None: ...
 
 
+async def _frame_url(locator: Any) -> str:
+    """URL of the document the field lives in, without running script in the page
+    (hardened pages can break the page's own eval)."""
+    handle_fn = getattr(locator, "element_handle", None)
+    if handle_fn is not None:
+        handle = await handle_fn(timeout=10000)
+        frame = await handle.owner_frame() if handle else None
+        if frame is not None:
+            return frame.url
+    return await locator.evaluate("el => el.ownerDocument.location.href")
+
+
 async def _read_value(locator: Any) -> str | None:
     try:
         return await locator.input_value()
@@ -117,13 +129,14 @@ class SecretInjector:
         scope: InjectionScope,
         *,
         human: bool = True,
+        frame: Any = None,  # the frame the locator was built from (known to the caller; avoids page script)
     ) -> None:
         ref = SecretRef.coerce(ref)
         try:
             if not ref.name.startswith(scope.secret_prefix):
                 raise InjectionRefused(f"{ref} does not belong to profile {scope.profile_id}")
             check_target_url(page.url, scope.allowed_domains)
-            frame_url = await locator.evaluate("el => el.ownerDocument.location.href")
+            frame_url = frame.url if frame is not None else await _frame_url(locator)
             host = check_target_url(frame_url, scope.allowed_domains)
         except InjectionRefused as e:
             self._audit.record("secret.refused", target=ref.name, profile=scope.profile_id, reason=str(e))

@@ -193,3 +193,44 @@ async def test_start_run_without_credentials_points_to_setup(ctx, monkeypatch):
     await settle(ctx)
     err = json.dumps(llm.calls[1][-1]["content"])
     assert "request_setup" in err and "no saved username or password" in err
+
+
+def test_site_checks_on_save(ctx):
+    from friday.profiles.models import Site, site_problems
+
+    bad = Site(id="amexbad", name="amex", login_url="https://www.americanexpress.com/en-in/account/login",
+               domains=["americanexpress", "vigneshtj27"])  # fmt: skip
+    problems = " ".join(site_problems(bad))
+    assert "'americanexpress' is not a domain name" in problems and "not on the site's domains" in problems
+    with pytest.raises(ValueError):
+        ctx.sites.upsert(bad)
+    assert not site_problems(Site(id="m", name="m", login_url="http://localhost:8000/x", domains=["localhost"]))
+
+
+async def test_find_site_repairs_a_broken_site(ctx, monkeypatch):
+    import friday.onboarding as ob
+    from friday.profiles.models import Site
+
+    # A broken record from before the checks existed.
+    ctx.db.execute(
+        "INSERT INTO sites (id, name, login_url, domains_json, otp_domains_json, otp_senders_json, created_at) VALUES (?, ?, ?, ?, '[]', '[]', 'x')",
+        ("amex", "amex", "https://www.americanexpress.com/en-in/account/login", json.dumps(["americanexpress", "vigneshtj27"])),
+    )
+
+    async def no_network(p, **kw):
+        return []
+
+    monkeypatch.setattr(ob, "check_reachable", no_network)
+
+    class Finder:
+        async def find(self, query, *, region_hint):
+            return dict(AMEX)
+
+    llm = ScriptedLLM([("find_site", {"provider": "amex"}), "ok"])
+    ctx.chat.assistant = ChatAssistant(ctx, lambda: llm)
+    ctx.chat.assistant.finder = Finder()
+    await ctx.chat.owner_says("fix amex")
+    await settle(ctx)
+    result = json.loads(llm.calls[1][-1]["content"][0]["content"])
+    assert result["site_id"] == "amex" and "repairs" in result and result["domains"] == ["americanexpress.com"]
+    assert isinstance(ctx.chat.assistant._proposals["p1"].site(), Site)

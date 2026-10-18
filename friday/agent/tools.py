@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from friday.agent import isolated
 from friday.agent.approvals import ApprovalGate
 from friday.agent.policy import ActionPolicy, Decision, Verdict, url_allowed
 from friday.agent.snapshot import ElementInfo, Snapshot, locator_for, take_snapshot
@@ -130,6 +131,9 @@ TOOLS: list[dict[str, Any]] = [
     ),
 ]
 INTERACTIVE = {"goto", "click", "type", "press", "select", "download_file"}
+
+FOCUSED_JS = "() => document.activeElement && document.activeElement.getAttribute('data-friday-ref')"
+MARK_SECRET_JS = "(ref) => { const el = document.querySelector(`[data-friday-ref=\"${ref}\"]`); if (el) el.setAttribute('data-friday-secret', '1'); }"
 
 TABLE_JS = r"""
 ([ref, index]) => {
@@ -250,13 +254,13 @@ class ToolExecutor:
 
     async def _focused(self) -> ElementInfo | None:
         try:
-            ref = await self.page.evaluate("() => document.activeElement && document.activeElement.getAttribute('data-friday-ref')")
+            ref = await isolated.evaluate(self.page.main_frame, FOCUSED_JS)
         except Exception:
             ref = None
         if not ref:
             await self.refresh()
             try:
-                ref = await self.page.evaluate("() => document.activeElement && document.activeElement.getAttribute('data-friday-ref')")
+                ref = await isolated.evaluate(self.page.main_frame, FOCUSED_JS)
             except Exception:
                 ref = None
         return await self._element(ref) if ref else None
@@ -379,7 +383,12 @@ class ToolExecutor:
         text = str(args["text"])
         loc = locator_for(self.page, el)
         if text.startswith("secret:"):
-            await self.d.injector.fill(self.page, loc, text, self.d.scope)
+            frame = self.page.frames[el.frame_index] if el.frame_index < len(self.page.frames) else self.page.main_frame
+            await self.d.injector.fill(self.page, loc, text, self.d.scope, frame=frame)
+            try:
+                await isolated.evaluate(frame, MARK_SECRET_JS, el.ref)
+            except Exception:
+                pass
             return ToolResult(f"Filled {el.ref} from {text}.")
         if el.data.get("type") in ("date", "month", "week", "time", "datetime-local", "color", "range"):
             # Native pickers don't take keystrokes reliably; set the value the way the picker would.
@@ -493,7 +502,7 @@ class ToolExecutor:
             return ToolResult(f"No download started: {type(e).__name__}", is_error=True)
 
     async def _t_extract_table(self, args: dict[str, Any], el: Any) -> ToolResult:
-        data = await self.page.evaluate(TABLE_JS, [args.get("ref"), int(args.get("index") or 0)])
+        data = await isolated.evaluate(self.page.main_frame, TABLE_JS, [args.get("ref"), int(args.get("index") or 0)])
         if not data:
             return ToolResult("No table found.", is_error=True)
         body = self.d.redactor.redact(json.dumps(data["rows"]))

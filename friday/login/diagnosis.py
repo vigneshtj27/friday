@@ -377,7 +377,9 @@ class Diagnoser:
                 c = classify(obs)
                 webdriver = None
                 try:
-                    webdriver = await page.evaluate("navigator.webdriver")
+                    from friday.agent import isolated
+
+                    webdriver = await isolated.evaluate(page.main_frame, "() => navigator.webdriver")
                 except Exception:
                     pass
                 exp = {

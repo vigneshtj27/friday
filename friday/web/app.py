@@ -169,7 +169,10 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def put_site(site_id: str, site: Site) -> Site:
         if site.id != site_id:
             raise HTTPException(400, "id mismatch")
-        return ctx.sites.upsert(site)
+        try:
+            return ctx.sites.upsert(site)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
 
     @app.get("/api/profiles", dependencies=[require])
     async def list_profiles():

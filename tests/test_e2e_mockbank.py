@@ -264,3 +264,11 @@ async def test_navigation_outside_allowlist_is_blocked(ectx, bank):
         await asyncio.sleep(1)
         assert ex.blocked_navigations and "exfil" in ex.blocked_navigations[0]
         assert "127.0.0.1:9" not in page.url  # the request never left; Chrome shows its error page instead
+
+
+async def test_login_on_a_page_that_disables_eval(ectx, bank):
+    """Some banks (Amex) replace window.eval; friday's page reads must not depend on it."""
+    pid = setup_scenario(ectx, bank, "hardened")
+    r = await run(ectx, "login", pid)
+    assert r["status"] == "succeeded", r
+    assert "LOGIN_FORM" in states(ectx, r["id"]) and "PAGE_FAILED" not in states(ectx, r["id"])

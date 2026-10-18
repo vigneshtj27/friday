@@ -21,6 +21,25 @@ def validate_domain(value: str) -> str:
     return value
 
 
+def site_problems(site: "Site") -> list[str]:
+    """Checks applied when a site is saved (not when loading old records, so a bad one can still be fixed)."""
+    from urllib.parse import urlparse
+
+    from friday.vault.injector import host_allowed
+
+    out = []
+    for d in [*site.domains, *site.otp_domains]:
+        if "." not in d and d != "localhost":
+            out.append(f"{d!r} is not a domain name (expected something like americanexpress.com)")
+    if site.login_url:
+        host = urlparse(site.login_url).hostname
+        if not host:
+            out.append(f"login URL {site.login_url!r} is not a URL")
+        elif not host_allowed(host, site.all_domains):
+            out.append(f"the login page {host} is not on the site's domains ({', '.join(site.all_domains)})")
+    return out
+
+
 class Site(BaseModel):
     id: str
     name: str

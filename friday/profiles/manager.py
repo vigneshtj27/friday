@@ -98,6 +98,11 @@ class SiteRegistry:
         self._audit = audit
 
     def upsert(self, site: Site, *, actor: str = "admin") -> Site:
+        from friday.profiles.models import site_problems
+
+        problems = site_problems(site)
+        if problems:
+            raise ValueError("; ".join(problems))
         self._db.execute(
             "INSERT INTO sites (id, name, login_url, domains_json, otp_domains_json, otp_senders_json, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,"

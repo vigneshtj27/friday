@@ -86,6 +86,12 @@ class LoginEngine:
         prefix = profile.secret_prefix
         history: list[str] = []
         start_url = site.login_url or f"https://{site.domains[0]}/"
+        from friday.profiles.models import site_problems
+
+        problems = site_problems(site)
+        if problems:
+            # Otherwise the allowlist blocks the login page and the run sees only Chrome's error page.
+            return LoginOutcome(False, LoginState.PAGE_FAILED, "The site's settings are wrong: " + "; ".join(problems) + ". Fix its domains, then try again.", history=[])
 
         # 1. Reuse a valid session if there is one.
         await ex.start()
@@ -257,6 +263,14 @@ class LoginEngine:
             case LoginState.CAPTCHA:
                 return await self._handoff(op, run_id, "CAPTCHA shown during sign-in", st, stop)
             case LoginState.CREDENTIALS_REJECTED:
+                if not submitted:
+                    # The form went out without the stored password (typing failed or was skipped):
+                    # not a verdict on the credentials, so it doesn't count toward the lockout limit.
+                    return HookResult(
+                        inject="That submit did not include the stored password (the type step failed or was "
+                        "skipped). Fill both fields with the secret: references and check they were filled "
+                        "before submitting. Do not submit an empty form again."
+                    )
                 st.rejections += 1
                 if st.rejections == 1:
                     return HookResult(

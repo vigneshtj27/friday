@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from friday.agent import isolated
+
 log = logging.getLogger(__name__)
 
 # Runs inside each frame. Tags elements with data-friday-ref and returns
@@ -196,7 +198,7 @@ async def take_snapshot(page: Any, *, max_text: int = 6000) -> Snapshot:
     for i, frame in enumerate(page.frames):
         prefix = "" if i == 0 else f"f{i}"
         try:
-            data = await frame.evaluate(WALKER_JS, [prefix, max_text if i == 0 else 1500])
+            data = await isolated.evaluate(frame, WALKER_JS, [prefix, max_text if i == 0 else 1500])
         except Exception as e:  # detached / cross-process frame mid-navigation
             log.debug("snapshot of frame %s failed: %s", frame.url, e)
             continue
