@@ -58,10 +58,13 @@ class LoginServices:
 
 
 class LoginEngine:
-    def __init__(self, services: LoginServices, *, max_steps: int = 30, push_wait_seconds: int = 180):
+    def __init__(
+        self, services: LoginServices, *, max_steps: int = 30, push_wait_seconds: int = 180, bounce_recheck_seconds: float = 4.0
+    ):
         self.s = services
         self.max_steps = max_steps
         self.push_wait_seconds = push_wait_seconds
+        self.bounce_recheck_seconds = bounce_recheck_seconds
 
     async def observe(self, ex: ToolExecutor, recorder: PageRecorder) -> Observation:
         try:
@@ -130,6 +133,13 @@ class LoginEngine:
             submitted = st.password_typed and ev.tool in ("click", "press") and ex.last_submit is not None
             obs = await self.observe(ex, recorder)
             c = classify(obs, just_submitted_credentials=submitted)
+            if c.state == LoginState.SILENT_BOUNCE and self.bounce_recheck_seconds > 0:
+                # A bounce stops the run, so be sure: some sites redirect a few seconds after the
+                # sign-in request returns. Look once more before calling it.
+                await asyncio.sleep(self.bounce_recheck_seconds)
+                await ex._settle()
+                obs = await self.observe(ex, recorder)
+                c = classify(obs, just_submitted_credentials=submitted)
             if c.state == LoginState.LOGGED_IN:
                 mc = await self._model_check(ex, obs, run_id)  # always confirm before declaring success
                 if mc.state != LoginState.LOGGED_IN:

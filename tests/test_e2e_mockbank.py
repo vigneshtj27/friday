@@ -272,3 +272,29 @@ async def test_login_on_a_page_that_disables_eval(ectx, bank):
     r = await run(ectx, "login", pid)
     assert r["status"] == "succeeded", r
     assert "LOGIN_FORM" in states(ectx, r["id"]) and "PAGE_FAILED" not in states(ectx, r["id"])
+
+
+async def test_login_submitted_by_script_waits_for_the_spinner(ectx, bank):
+    """Amex sends the form by XHR and spins for seconds with no navigation. Classifying the page
+    while the button still spins saw the same login form and called it a SILENT_BOUNCE."""
+    pid = setup_scenario(ectx, bank, "xhr")
+    r = await run(ectx, "login", pid)
+    st = states(ectx, r["id"])
+    assert r["status"] == "succeeded", (r, st)
+    assert "SILENT_BOUNCE" not in st and "LOGGED_IN" in st
+    click = next(s for s in ectx.runs.steps(r["id"]) if s["tool"] == "click" and "Sign in" in (s["result"] or ""))
+    assert "Waited" in click["result"] and "Page is now" in click["result"], click["result"]
+
+
+async def test_bounce_verdict_is_rechecked_before_stopping(ectx, bank, monkeypatch):
+    """Even if the submit wait gives up early, a page that redirects a moment later is not a bounce."""
+    import friday.agent.tools as tools
+    import friday.mock_site as mock_site
+
+    monkeypatch.setattr(tools, "SUBMIT_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(mock_site, "XHR_LOGIN_DELAY", 1.5)  # well inside the engine's 4 s re-check
+    pid = setup_scenario(ectx, bank, "xhr", account="late")
+    r = await run(ectx, "login", pid)
+    st = states(ectx, r["id"])
+    assert r["status"] == "succeeded", (r, st)
+    assert "SILENT_BOUNCE" not in st

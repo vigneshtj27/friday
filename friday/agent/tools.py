@@ -132,6 +132,12 @@ TOOLS: list[dict[str, Any]] = [
 ]
 INTERACTIVE = {"goto", "click", "type", "press", "select", "download_file"}
 
+# A submit that the page sends by script (fetch/XHR, then a redirect) never navigates while the
+# button spins, so load-state waits return at once. These are the requests that mean "still sending".
+SUBMIT_REQUEST_TYPES = {"document", "xhr", "fetch"}
+SUBMIT_WAIT_SECONDS = 20.0  # longest wait for a submit to finish; long-polls and slow banks hit this cap
+SUBMIT_QUIET_SECONDS = 1.0  # no submit-type request in flight for this long = the submit has finished
+
 FOCUSED_JS = "() => document.activeElement && document.activeElement.getAttribute('data-friday-ref')"
 MARK_SECRET_JS = "(ref) => { const el = document.querySelector(`[data-friday-ref=\"${ref}\"]`); if (el) el.setAttribute('data-friday-secret', '1'); }"
 
@@ -206,12 +212,16 @@ class ToolExecutor:
         self.downloads: list[dict[str, Any]] = []
         self.last_submit: dict[str, Any] | None = None  # set when the last action submitted a form
         self._started = False
+        self._inflight: dict[Any, float] = {}  # request -> loop time it started (submit-type requests only)
 
     async def start(self) -> None:
         if self._started:
             return
         self._started = True
         self.context.on("page", self._on_page)
+        self.context.on("request", self._on_request)
+        self.context.on("requestfinished", self._on_request_done)
+        self.context.on("requestfailed", self._on_request_done)
         await self.context.route("**/*", self._route)
 
     async def stop(self) -> None:
@@ -225,6 +235,16 @@ class ToolExecutor:
         # Popups and new tabs become the active page.
         self.page = page
         self.snapshot = None
+
+    def _on_request(self, request: Any) -> None:
+        try:
+            if request.resource_type in SUBMIT_REQUEST_TYPES:
+                self._inflight[request] = asyncio.get_running_loop().time()
+        except Exception:
+            pass
+
+    def _on_request_done(self, request: Any) -> None:
+        self._inflight.pop(request, None)
 
     async def _route(self, route: Any, request: Any) -> None:
         try:
@@ -276,6 +296,34 @@ class ToolExecutor:
                 await self.page.wait_for_load_state(state, timeout=timeout)
             except Exception:
                 pass
+
+    async def _settle_submit(self, url_before: str, since: float) -> float:
+        """Wait for a submit to finish: the page navigates, or every fetch/XHR/document request
+        started since the action (loop time `since`) has been done for SUBMIT_QUIET_SECONDS.
+        Returns seconds waited."""
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        quiet_since: float | None = None
+        while (now := loop.time()) - start < SUBMIT_WAIT_SECONDS:
+            if self.page.url != url_before:
+                break
+            if any(t >= since for t in self._inflight.values()):
+                quiet_since = None
+            elif quiet_since is None:
+                quiet_since = now
+            elif now - quiet_since >= SUBMIT_QUIET_SECONDS:
+                break
+            await asyncio.sleep(0.2)
+        await self._settle()
+        return loop.time() - start
+
+    async def _after_action(self, url_before: str, since: float) -> str:
+        """Settle after a click/press; a form submit gets the longer wait. Returns a note for the result."""
+        if self.last_submit is None:
+            await self._settle()
+            return ""
+        waited = await self._settle_submit(url_before, since)
+        return f" Waited {waited:.1f}s for the form to finish sending." if waited >= 2 else ""
 
     def _describe(self, name: str, args: dict[str, Any], el: ElementInfo | None) -> str:
         url = self.page.url
@@ -373,11 +421,12 @@ class ToolExecutor:
     async def _t_click(self, args: dict[str, Any], el: ElementInfo) -> ToolResult:
         url_before = self.page.url
         self.last_submit = el.data if (el.data.get("isSubmit") or el.data.get("form")) else None
+        since = asyncio.get_running_loop().time()
         await locator_for(self.page, el).click(timeout=15000)
-        await self._settle()
+        waited = await self._after_action(url_before, since)
         self.snapshot = None
         moved = f" Page is now {self.page.url}." if self.page.url != url_before else ""
-        return ToolResult(f"Clicked {el.ref} ({el.name!r}).{moved}")
+        return ToolResult(f"Clicked {el.ref} ({el.name!r}).{moved}{waited}")
 
     async def _t_type(self, args: dict[str, Any], el: ElementInfo) -> ToolResult:
         text = str(args["text"])
@@ -401,15 +450,16 @@ class ToolExecutor:
 
     async def _t_press(self, args: dict[str, Any], el: ElementInfo | None) -> ToolResult:
         key = str(args["key"])
-        if key.lower() == "enter" and el is not None and el.form:
-            self.last_submit = el.data
+        url_before = self.page.url
+        self.last_submit = el.data if key.lower() == "enter" and el is not None and el.form else None
+        since = asyncio.get_running_loop().time()
         if args.get("ref") and el is not None:
             await locator_for(self.page, el).press(key)
         else:
             await self.page.keyboard.press(key)
-        await self._settle()
+        waited = await self._after_action(url_before, since)
         self.snapshot = None
-        return ToolResult(f"Pressed {key}.")
+        return ToolResult(f"Pressed {key}.{waited}")
 
     async def _t_select(self, args: dict[str, Any], el: ElementInfo) -> ToolResult:
         loc = locator_for(self.page, el)

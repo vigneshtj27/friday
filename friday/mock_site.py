@@ -1,12 +1,13 @@
 """A local mock bank for tests and first-run demos. Each scenario lives under /s/<scenario>/.
 
-Scenarios: normal, email_otp, sms_otp, totp, push, bounce, denied, captcha.
+Scenarios: normal, email_otp, sms_otp, totp, push, bounce, denied, captcha, hardened, xhr.
 Test credentials: username "alice", password "correct-horse-battery". TOTP seed MOCK_TOTP_SEED.
 `/mock/outbox` shows the codes the "bank" sent (for tests standing in for Gmail / SMS).
 """
 
 from __future__ import annotations
 
+import asyncio
 import html
 import random
 import secrets
@@ -15,14 +16,17 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from friday.otp.totp import totp
 
 USERNAME = "alice"
 PASSWORD = "correct-horse-battery"
 MOCK_TOTP_SEED = "JBSWY3DPEHPK3PXP"
-SCENARIOS = {"normal", "email_otp", "sms_otp", "totp", "push", "bounce", "denied", "captcha", "hardened"}
+SCENARIOS = {"normal", "email_otp", "sms_otp", "totp", "push", "bounce", "denied", "captcha", "hardened", "xhr"}
+# "xhr": the form is sent by script and the button spins for XHR_LOGIN_DELAY seconds before the
+# page redirects, with no navigation in between (American Express signs in this way).
+XHR_LOGIN_DELAY = 4.0
 # "hardened": every page disables eval/Function the way some banks (e.g. American Express) do.
 HARDEN_JS = ("<script>(()=>{const no=()=>{throw new Error('eval is disabled')};"
              "window.eval=no;window.Function=function(){no()};})()</script>")
@@ -109,13 +113,22 @@ def create_mock_app() -> FastAPI:
         if sc == "captcha":
             captcha = "<div class='g-recaptcha' data-sitekey='x'>[ ] I'm not a robot</div><p>Please verify you are human.</p>"
         err = f"<p role=alert style='color:red'>{html.escape(error)}</p>" if error else ""
+        script = ""
+        if sc == "xhr":
+            script = f"""<script>document.querySelector('form').addEventListener('submit', async e => {{
+  e.preventDefault();
+  const b = e.target.querySelector('button'); b.disabled = true; b.setAttribute('aria-busy', 'true'); b.textContent = '...';
+  const r = await fetch('/s/{sc}/api/login', {{method: 'POST', body: new FormData(e.target)}});
+  const j = await r.json();
+  location.href = j.redirect;
+}});</script>"""
         return page(
             "Sign in - MockBank",
             f"""<h2>Sign in to online banking</h2>{err}
 <form method=post action=/s/{sc}/login>
 <label for=u>Customer ID</label><br><input id=u name=username autocomplete=username><br>
 <label for=p>Password</label><br><input id=p name=password type=password autocomplete=current-password><br>
-{captcha}<button type=submit>Sign in</button></form>""",
+{captcha}<button type=submit>Sign in</button></form>{script}""",
         )
 
     @app.get("/")
@@ -167,6 +180,17 @@ def create_mock_app() -> FastAPI:
         r = RedirectResponse(f"/s/{sc}/{target}", status_code=303)
         r.set_cookie(f"mb_{sc}", token, max_age=30 * 86400, httponly=True, path=f"/s/{sc}")
         return r
+
+    @app.post("/s/{sc}/api/login")
+    async def login_api(sc: str, username: str = Form(""), password: str = Form("")):
+        await asyncio.sleep(XHR_LOGIN_DELAY)
+        r = await login_post(sc, username, password)
+        if isinstance(r, RedirectResponse):  # tell the page's script where to go; keep the session cookie
+            out = JSONResponse({"redirect": r.headers["location"]})
+            if "set-cookie" in r.headers:
+                out.headers["set-cookie"] = r.headers["set-cookie"]
+            return out
+        return JSONResponse({"redirect": f"/s/{sc}/login"})
 
     @app.get("/s/{sc}/otp")
     async def otp_get(request: Request, sc: str, error: str = ""):
