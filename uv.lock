@@ -325,6 +325,7 @@ dependencies = [
     { name = "itsdangerous" },
     { name = "keyring" },
     { name = "openpyxl" },
+    { name = "patchright" },
     { name = "playwright" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -333,11 +334,6 @@ dependencies = [
     { name = "python-multipart" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.optional-dependencies]
-patchright = [
-    { name = "patchright" },
 ]
 
 [package.dev-dependencies]
@@ -357,7 +353,7 @@ requires-dist = [
     { name = "itsdangerous", specifier = ">=2.2" },
     { name = "keyring", specifier = ">=25" },
     { name = "openpyxl", specifier = ">=3.1.5" },
-    { name = "patchright", marker = "extra == 'patchright'", specifier = ">=1.48" },
+    { name = "patchright", specifier = ">=1.64.1" },
     { name = "playwright", specifier = ">=1.48" },
     { name = "pydantic", specifier = ">=2.8" },
     { name = "pydantic-settings", specifier = ">=2.4" },
@@ -367,7 +363,6 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
-provides-extras = ["patchright"]
 
 [package.metadata.requires-dev]
 dev = [

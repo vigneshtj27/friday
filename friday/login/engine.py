@@ -285,8 +285,25 @@ class LoginEngine:
                 return stop(LoginState.CREDENTIALS_REJECTED, "needs_attention", "Credentials rejected twice; stopped to avoid locking the account.")
             case LoginState.SILENT_BOUNCE | LoginState.ACCESS_DENIED_OR_BLOCKED:
                 evidence_box["evidence"] = await self._evidence(ex, recorder, c.state)
-                await self.s.notifier.send(f"Sign-in to {site.name} ({profile.account}) hit {c.state}. Diagnosis started.")
-                return stop(c.state, "needs_attention", f"{c.state}: {c.reason}. A diagnosis report was started.")
+                blocked = c.state == LoginState.ACCESS_DENIED_OR_BLOCKED
+                if blocked:
+                    # An edge block (e.g. Akamai 403) is not about the credentials or the steps:
+                    # retrying just burns attempts. Stop and ask for a re-seed / network change.
+                    msg = (
+                        f"{site.name} ({profile.account}) was blocked by the site before sign-in could complete "
+                        "(looks like a bot/edge block, not a password problem). I stopped rather than retry. "
+                        "Signing in by hand once in this browser, or routing this account through a home/residential "
+                        "connection, usually clears it. A diagnosis report has the details."
+                    )
+                else:
+                    msg = f"Sign-in to {site.name} ({profile.account}) hit {c.state}. Diagnosis started."
+                await self.s.notifier.send(msg)
+                summary = (
+                    f"Blocked by the site ({c.reason}) — session needs re-seeding or a different egress, not a retry. "
+                    "A diagnosis report was started." if blocked
+                    else f"{c.state}: {c.reason}. A diagnosis report was started."
+                )
+                return stop(c.state, "needs_attention", summary)
             case LoginState.PAGE_FAILED:
                 if st.counts[c.state] == 1:
                     return HookResult(inject=f"The page failed to load. Navigate to {site.login_url or ex.page.url} once more.")

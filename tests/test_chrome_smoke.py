@@ -69,3 +69,29 @@ async def test_real_chrome_persistent_profile(ctx, local_site, driver):
         assert "seen=2" in await page.evaluate("document.cookie")
     assert ctx.audit.verify_chain()
     assert "Real-Chrome-Pw-1" not in repr(ctx.audit.list(limit=1000))
+
+
+@pytest.mark.parametrize("driver,expect_webdriver", [("playwright", True), ("patchright", False)])
+async def test_driver_webdriver_flag_and_locale(driver, expect_webdriver):
+    """patchright removes navigator.webdriver; locale is set consistently from the profile."""
+    import tempfile
+    from pathlib import Path
+
+    from friday.agent import isolated
+    from friday.drivers import get_driver, LaunchRequest
+
+    d = Path(tempfile.mkdtemp())
+    req = LaunchRequest(user_data_dir=d / "c", downloads_dir=d / "dl", locale="en-IN",
+                        timezone="Asia/Kolkata", window_width=1280, window_height=800)
+    session = await get_driver(driver).launch(req)
+    try:
+        page = await session.page()
+        await page.goto("https://example.com", wait_until="domcontentloaded", timeout=45000)
+        wd = await isolated.evaluate(page.main_frame, "() => navigator.webdriver")
+        lang = await isolated.evaluate(page.main_frame, "() => navigator.language")
+        assert bool(wd) is expect_webdriver, f"{driver} webdriver={wd}"
+        assert session.stealth is (driver == "patchright")
+        if driver == "playwright":
+            assert lang == "en-IN", f"locale not applied: {lang}"
+    finally:
+        await session.close()

@@ -146,6 +146,50 @@ def profile_show(profile_id: str):
     typer.echo(json.dumps(_ctx().profiles.get(profile_id).model_dump(), indent=2))
 
 
+@profile_app.command("set-proxy")
+def profile_set_proxy(
+    profile_id: str,
+    server: Annotated[str, typer.Option(help="scheme://host:port, e.g. http://residential.example:8000")],
+    username: Annotated[Optional[str], typer.Option(help="proxy username (stored in the vault)")] = None,
+    patchright: Annotated[bool, typer.Option("--patchright/--no-patchright", help="also switch this profile to the stealth driver")] = False,
+    driver: Annotated[Optional[str], typer.Option(help="set the driver (playwright | patchright | cdp)")] = None,
+):
+    """Route one profile's browser through a proxy. The password is prompted and stored encrypted."""
+    from friday.profiles.models import ProfileConfig, ProxyConfig
+    from friday.vault.store import SecretKind
+
+    ctx = _ctx()
+    profile = ctx.profiles.get(profile_id)
+    user_secret = pass_secret = None
+    if username:
+        prefix = profile.secret_prefix
+        ctx.vault.put(f"{prefix}proxy-user", username, kind=SecretKind.PROXY, actor="cli")
+        user_secret = f"{prefix}proxy-user"
+        pw = typer.prompt("Proxy password", hide_input=True)
+        ctx.vault.put(f"{prefix}proxy-pass", pw, kind=SecretKind.PROXY, actor="cli")
+        pass_secret = f"{prefix}proxy-pass"
+    cfg = profile.config.model_copy(
+        update={
+            "proxy": ProxyConfig(server=server, username_secret=user_secret, password_secret=pass_secret),
+            "driver": "patchright" if patchright else (driver or profile.config.driver),
+        }
+    )
+    ctx.profiles.update_config(profile_id, cfg, actor="cli")
+    # Re-pin the browser identity on the next open (egress/driver changed).
+    ctx.db.execute("UPDATE profiles SET fingerprint_json = NULL WHERE id = ?", (profile_id,))
+    typer.echo(f"{profile_id}: proxy {server}, driver {cfg.driver or ctx.settings.driver}")
+
+
+@profile_app.command("set-driver")
+def profile_set_driver(profile_id: str, driver: str):
+    """Switch a profile's browser driver (playwright | patchright | cdp)."""
+    ctx = _ctx()
+    profile = ctx.profiles.get(profile_id)
+    ctx.profiles.update_config(profile_id, profile.config.model_copy(update={"driver": driver}), actor="cli")
+    ctx.db.execute("UPDATE profiles SET fingerprint_json = NULL WHERE id = ?", (profile_id,))
+    typer.echo(f"{profile_id}: driver {driver}")
+
+
 @profile_app.command("wipe")
 def profile_wipe(profile_id: str, yes: Annotated[bool, typer.Option("--yes")] = False):
     """Revoke everything for a profile: Chrome data, downloads, and its secrets."""

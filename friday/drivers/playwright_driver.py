@@ -30,6 +30,8 @@ class PlaywrightDriver(Driver):
                 channel=None if req.executable else req.channel,
                 executable_path=str(req.executable) if req.executable else None,
                 headless=req.headless,
+                # One consistent locale per profile, matching the egress IP's country.
+                locale=req.locale,
                 # Playwright defaults to --no-sandbox on Linux: a security downgrade and a
                 # visible "unsupported flag" bar no real user has. Keep Chrome's sandbox on.
                 chromium_sandbox=req.sandbox,
