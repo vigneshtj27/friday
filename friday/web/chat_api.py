@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -28,6 +28,8 @@ WINDOW = 200  # messages whose cards are kept current
 
 class ChatIn(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
+
+
 
 
 def _seconds_left(expires_at: str | None) -> int:
@@ -48,6 +50,7 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
             sorted(r.id for r in ctx.broker.pending()),
             sorted(a.id for a in ctx.gate.pending()),
             sorted(h.id for h in ctx.handoffs.list_open()),
+            sorted(r["id"] for r in ctx.onboarding.pending()) if ctx.onboarding else [],
             sorted(ctx.jobs.active()) if ctx.jobs else [],
             typing(),
         ]
@@ -78,6 +81,8 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
             is_open = bool(h and h.is_open)
             return {"status": "pending" if is_open else ("expired" if r["state"] == "pending" else r["state"]),
                     "reason": r["reason"], "remote_view": bool(h and h.vnc), "link": f"/handoff/{ref}"}  # fmt: skip
+        if kind == "setup":
+            return ctx.onboarding.card(ref)
         if kind == "run":
             r = ctx.runs.get(ref)
             if r is None:
@@ -99,6 +104,9 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
         otp, appr, hand = ctx.broker.pending(), ctx.gate.pending(), ctx.handoffs.list_open()
         active = ctx.jobs.active() if ctx.jobs else []
         parts = []
+        setups = ctx.onboarding.pending()
+        if setups:
+            parts.append(f"{len(setups)} setup card{'s' if len(setups) > 1 else ''} ({', '.join(r['profile_id'] for r in setups)})")
         if otp:
             parts.append(f"{len(otp)} code request{'s' if len(otp) > 1 else ''} ({', '.join(r.profile_id for r in otp)})")
         if appr:
@@ -140,6 +148,34 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
     async def chat_send(body: ChatIn):
         mine = await ctx.chat.owner_says(body.text, status_line)
         return {"id": mine["id"]}
+
+    @app.post("/api/setup/{setup_id}", dependencies=deps)
+    async def setup_submit(setup_id: str, request: Request):
+        # Parsed by hand: FastAPI's validation errors echo the submitted input, and these are secrets.
+        from friday.onboarding import SetupError
+
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "expected a JSON body") from None
+        raw = body.get("values") if isinstance(body, dict) else None
+        if not isinstance(raw, dict) or len(raw) > 8 or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
+            raise HTTPException(400, "values must be an object of text fields")
+        values: dict[str, str] = dict(raw)
+        raw.clear()
+        try:
+            return await ctx.onboarding.complete(setup_id, values)
+        except SetupError as e:
+            raise HTTPException(400, str(e)) from None
+        finally:
+            values.clear()
+
+    @app.post("/api/setup/{setup_id}/cancel", dependencies=deps)
+    async def setup_cancel(setup_id: str):
+        if not ctx.onboarding.cancel(setup_id):
+            raise HTTPException(404, "setup request is not pending")
+        await ctx.chat.send("Cancelled. Nothing was saved.")
+        return {"ok": True}
 
     @app.delete("/api/chat", dependencies=deps, status_code=204)
     async def chat_clear():

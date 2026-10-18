@@ -171,6 +171,21 @@ MIGRATIONS: list[str] = [
         profile_id TEXT
     );
     """,
+    """
+    CREATE TABLE setup_requests (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        site_json TEXT NOT NULL,
+        site_is_new INTEGER NOT NULL,
+        profile_id TEXT NOT NULL,
+        fields_json TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        resume_json TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        completed_at TEXT
+    );
+    """,
 ]
 
 

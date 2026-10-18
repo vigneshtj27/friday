@@ -51,6 +51,7 @@ class AppContext:
     diagnoser: Diagnoser
     transactions: TransactionStore
     jobs: Any = field(default=None)
+    onboarding: Any = field(default=None)
 
     def portal_link(self, fragment: str = "") -> str:
         return f"{self.settings.public_base_url.rstrip('/')}/portal#{fragment}"
@@ -105,6 +106,9 @@ def build_context(
 
         llm_factory = lambda: default_llm(settings)  # noqa: E731
     ctx.jobs = JobRunner(ctx, llm_factory)
+    from friday.onboarding import Onboarding
+
+    ctx.onboarding = Onboarding(ctx)
     if chat_llm_factory is None:
         from friday.agent.llm import AnthropicLLM
 

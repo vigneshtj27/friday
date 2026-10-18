@@ -37,6 +37,8 @@ class ScriptedLLM:
 @pytest.fixture
 def setup(ctx, monkeypatch):
     ctx.profiles.create("mybank", "me", ProfileConfig())
+    ctx.vault.put("mybank/me/username", "test-user")
+    ctx.vault.put("mybank/me/password", "test-pass-123")
     submitted = []
 
     def submit(kind, profile_id, params=None, *, force=False):

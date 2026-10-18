@@ -38,6 +38,7 @@ const ICONS = {
   otp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3"/><path d="m17 6 3 3"/><path d="m14 9 2 2"/></svg>',
   approval: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg>',
   handoff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 22h8"/><path d="M12 18v4"/></svg>',
+  setup: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
   run: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"/><path d="M14 2v6h6"/><path d="M9 15l2 2 4-4"/></svg>',
 };
 
@@ -55,7 +56,7 @@ function linkify(text) {
 
 const STATUS = {
   pending: ["Waiting on you", "pending"], resolved: ["Code delivered", "good"], approved: ["Approved", "good"],
-  denied: ["Denied", "bad"], expired: ["Expired", ""], cancelled: ["Cancelled", ""], done: ["Done", "good"],
+  denied: ["Denied", "bad"], expired: ["Expired", ""], cancelled: ["Cancelled", ""], done: ["Done", "good"], saved: ["Saved", "good"],
   succeeded: ["Succeeded", "good"], failed: ["Failed", "bad"], blocked: ["Blocked", "bad"],
   needs_attention: ["Needs attention", "pending"], running: ["Running", "pending"], queued: ["Queued", ""],
 };
@@ -108,6 +109,34 @@ function cardHTML(m) {
       ${live ? `<div class="row"><a class="btn primary" href="${esc(c.link)}" target="_blank" rel="noopener">${c.remote_view ? "Open remote view" : "Open instructions"}</a>
         <button class="btn" data-done="${esc(m.ref)}">I'm done</button></div>` : ""}
     </div>`;
+  }
+  if (m.kind === "setup") {
+    const st = c.site || {};
+    const title = c.new_site ? `Set up ${st.name}` : `Credentials for ${st.name}`;
+    const header = head(title, acct).replace(pill(c.status), pill(c.status === "done" ? "saved" : c.status));
+    if (!live) {
+      const msg = { done: "Saved to the encrypted vault. friday's assistant never saw it.", cancelled: "Cancelled. Nothing was saved.", expired: "This card expired. Nothing was saved." }[c.status] || "";
+      return header + `<div class="card-main"><p class="card-sub" style="margin:0">${esc(msg)}</p></div>`;
+    }
+    const site = c.new_site ? `<div class="site-check">
+        <div class="card-sub">Found this sign-in page. Check it's the real site before saving:</div>
+        <a class="url" href="${esc(st.login_url)}" target="_blank" rel="noopener noreferrer">${esc(st.login_url)}</a>
+        <div class="chips">${[...(st.domains || []), ...(st.otp_domains || [])].map((d) => `<span class="chip">${esc(d)}</span>`).join("")}</div>
+        ${(st.checks || []).map((t) => `<div class="card-sub">· ${esc(t)}</div>`).join("")}
+        ${st.official_export ? `<div class="card-sub">Official option: ${esc(st.official_export)}</div>` : ""}
+      </div>` : "";
+    const fields = (c.fields || []).map((f) => `<label class="field"><span>${esc(f.label)}</span>
+        <input name="${esc(f.name)}" type="${f.input === "password" ? "password" : "text"}" autocomplete="${esc(f.autocomplete)}"
+          autocapitalize="off" spellcheck="false" ${f.required && !f.saved ? "required" : ""}
+          placeholder="${f.saved ? "already saved: leave blank to keep" : ""}"></label>`).join("");
+    return header + `<div class="card-main">
+      ${c.purpose ? `<p class="card-sub">${esc(c.purpose)}</p>` : ""}${site}
+      <form class="setup" data-setup="${esc(m.ref)}" autocomplete="on">${fields}
+        <p class="card-sub lock">These go straight to friday's encrypted vault. The chat and the assistant never see them.</p>
+        <div class="row">${countdown(m.ref)}<span class="grow"></span>
+          <button class="btn" type="button" data-setup-cancel="${esc(m.ref)}">Cancel</button>
+          <button class="btn primary" type="submit">${c.new_site ? "Confirm site and save" : "Save and continue"}</button></div>
+      </form></div>`;
   }
   if (m.kind === "run") {
     const title = { fetch_statement: "Statement fetch", login: "Sign-in", task: "Task" }[c.kind] || "Run";
@@ -274,6 +303,24 @@ async function busy(btn, fn) {
 }
 
 thread.addEventListener("submit", (e) => {
+  const sf = e.target.closest("[data-setup]");
+  if (sf) {
+    e.preventDefault();
+    const values = {};
+    for (const el of sf.querySelectorAll("input[name]")) { if (el.value) values[el.name] = el.value; }
+    busy(sf.querySelector("button[type=submit]"), async () => {
+      try {
+        await req("POST", `/api/setup/${encodeURIComponent(sf.dataset.setup)}`, { values });
+        for (const el of sf.querySelectorAll("input")) el.value = "";
+        document.activeElement?.blur();
+        toast("Saved to the vault");
+      } finally {
+        for (const k of Object.keys(values)) values[k] = "";
+      }
+      await refresh();
+    });
+    return;
+  }
   const f = e.target.closest("[data-otp]");
   if (!f) return;
   e.preventDefault();
@@ -290,7 +337,14 @@ thread.addEventListener("submit", (e) => {
 
 thread.addEventListener("click", (e) => {
   const ap = e.target.closest("[data-ap]"), done = e.target.closest("[data-done]"), shot = e.target.closest(".shot");
+  const sc = e.target.closest("[data-setup-cancel]");
   if (e.target.id === "older") return loadOlder(e.target);
+  if (sc) {
+    return busy(sc, async () => {
+      await req("POST", `/api/setup/${encodeURIComponent(sc.dataset.setupCancel)}/cancel`);
+      await refresh();
+    });
+  }
   if (ap) {
     const yes = ap.dataset.v === "1";
     busy(ap, async () => {
