@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
 from friday.context import AppContext
+from friday.preflight import otp_channel
+from friday.version import build_info
 from friday.jobs import Backoff
 from friday.profiles.manager import ProfileNotFound
 from friday.profiles.models import ProfileConfig
@@ -65,6 +67,10 @@ def register_api(app: FastAPI, ctx: AppContext, require: Any) -> None:
             "sheets_connected": ctx.sheets.configured,
             "notify": [n.name for n in ctx.notifier.notifiers],
             "model": ctx.settings.model,
+            "version": build_info(),
+            "preflight": {p.id: ctx.prefs.get(f"preflight:{p.id}") for p in ctx.profiles.list()},
+            "egress": {p.id: ctx.prefs.get(f"egress:{p.id}") for p in ctx.profiles.list()},
+            "otp_channels": {s.id: otp_channel(ctx, s) for s in ctx.sites.list()},
         }
 
     # ---- profiles & runs ----------------------------------------------------

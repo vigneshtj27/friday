@@ -154,14 +154,15 @@ ship() {
   # Ships DEPLOY_REF (origin/main by default). From Cloud Build (cloudbuild.yaml)
   # COMMIT_SHA is set and the pushed commit is already checked out, possibly
   # without .git, in which case the tree is tarred as is.
-  local ref=$DEPLOY_REF rev tgz remote
+  local ref=$DEPLOY_REF rev full built tgz remote
   if [ -n "${COMMIT_SHA:-}" ]; then
     ref=HEAD
   elif [ "${ref#origin/}" != "$ref" ]; then
     git -C "$ROOT" fetch -q origin "${ref#origin/}"
   fi
-  rev=${COMMIT_SHA:-$(git -C "$ROOT" rev-parse "$ref")}
-  rev=${rev:0:7}
+  full=${COMMIT_SHA:-$(git -C "$ROOT" rev-parse "$ref")}
+  rev=${full:0:7}
+  built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   say "Shipping $ref ($rev) and starting friday (the first build takes a few minutes)"
   tgz=$(mktemp "${TMPDIR:-/tmp}/friday-XXXXXX")
   if git -C "$ROOT" rev-parse --verify -q "$ref" >/dev/null 2>&1; then
@@ -174,11 +175,16 @@ ship() {
   rm -f "$tgz"
   # flock: a push-triggered build and a manual ship never swap the app dir at once.
   ssh_vm "sudo flock -w 900 /var/lock/rv-fri-deploy bash -c 'rm -rf /opt/friday/app.new && mkdir -p /opt/friday/app.new && tar -xzf $remote -C /opt/friday/app.new \
+    && printf %s '\''{\"sha\": \"$full\", \"ref\": \"$ref\", \"built_at\": \"$built\"}'\'' > /opt/friday/app.new/friday/BUILD_INFO \
     && rm -rf /opt/friday/app.old && { [ ! -d /opt/friday/app ] || mv /opt/friday/app /opt/friday/app.old; } \
     && mv /opt/friday/app.new /opt/friday/app && rm $remote && /usr/local/bin/rv-fri-up'"
   say "Health"
   for _ in $(seq 30); do
-    if ssh_vm "curl -fsS http://127.0.0.1:8765/healthz" 2>/dev/null; then echo; return; fi
+    if out=$(ssh_vm "curl -fsS http://127.0.0.1:8765/healthz" 2>/dev/null); then
+      echo "  $out"
+      case $out in *"\"$rev\""*) return ;; esac
+      echo "  ...still the old version, waiting"  # the old container answers until the new one is up
+    fi
     sleep 5
   done
   echo "  friday did not answer on 127.0.0.1:8765/healthz within 150s" >&2
@@ -265,6 +271,7 @@ case "${1:-all}" in
   public) public ;;
   private) private ;;
   google-client) google_client ;;
+  cli) shift; ssh_vm "cd /opt/friday/app && sudo docker compose exec -T friday friday $(printf '%q ' "$@")" ;;
   destroy) destroy ;;
-  *) echo "usage: $0 [all|ship|tunnel|public|private|google-client|destroy]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|ship|tunnel|public|private|google-client|cli <friday args>|destroy]" >&2; exit 2 ;;
 esac

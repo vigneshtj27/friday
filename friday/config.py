@@ -29,6 +29,9 @@ class Settings(BaseSettings):
 
     # browser
     driver: Literal["playwright", "patchright", "cdp"] = "playwright"
+    # enforce: a sign-in run whose prerequisites fail (friday/preflight.py) doesn't touch the site.
+    # warn: log and go ahead. off: skip the checks.
+    preflight: Literal["enforce", "warn", "off"] = "enforce"
     chrome_channel: str = "chrome"
     chrome_executable: Path | None = None
     # Chrome's own sandbox. Needs user namespaces; in Docker that means a seccomp

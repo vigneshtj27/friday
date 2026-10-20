@@ -61,6 +61,7 @@ class AppContext:
     memory: Any = field(default=None)
     tools: Any = field(default=None)
     scheduler: Any = field(default=None)
+    preflight: Any = field(default=None)
     onboarding: Any = field(default=None)
 
     def portal_link(self, fragment: str = "") -> str:
@@ -126,6 +127,9 @@ def build_context(
     from friday.scheduler import Scheduler
 
     ctx.scheduler = Scheduler(ctx)
+    from friday.preflight import Preflight
+
+    ctx.preflight = Preflight(ctx)
     from friday.onboarding import Onboarding
 
     ctx.onboarding = Onboarding(ctx)

@@ -72,10 +72,29 @@ def create_app(ctx: AppContext) -> FastAPI:
     auth = Auth(ctx.settings, ctx.cipher)
     require = Depends(auth.require)
 
+    def _startup_doctor() -> None:
+        """Clear stale identity pins at start, and say which (P1-6)."""
+        from friday.profiles.doctor import check_all
+
+        try:
+            reports = check_all(ctx, repin=True)
+        except Exception:
+            log.exception("profile doctor failed at startup")
+            return
+        fixed = [r for r in reports if r.needs_repin]
+        broken = [r for r in reports if r.issues and not r.needs_repin]
+        if fixed:
+            ctx.chat.store.add("friday", "At startup I re-pinned the browser identity of "
+                               + ", ".join(f"{r.profile_id} ({'; '.join(r.issues)})" for r in fixed)
+                               + ". The next sign-in records it fresh under the current settings.")  # fmt: skip
+        for r in broken:
+            log.warning("profile %s identity mismatch: %s", r.profile_id, "; ".join(r.issues))
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await ctx.notifier.start(ctx.broker.handle_reply)  # chat replies resolve pending OTP requests
         ctx.scheduler.start()
+        _startup_doctor()
         yield
         await ctx.scheduler.stop()
         await ctx.jobs.shutdown()
@@ -96,7 +115,10 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> dict:
-        return {"ok": True}
+        from friday.version import build_info
+
+        b = build_info()  # unauthenticated: the short commit and build time only
+        return {"ok": True, "version": b["short"], "built_at": b["built_at"]}
 
     @app.get("/login")
     async def login_form(next: str = "/") -> HTMLResponse:

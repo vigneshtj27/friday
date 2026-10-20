@@ -45,7 +45,9 @@ FINGERPRINT_JS = """() => ({
   webdriver: navigator.webdriver,
 })"""
 # Fields that legitimately change (Chrome auto-updates).
-VOLATILE_FINGERPRINT = {"userAgent", "browserVersion"}
+VOLATILE_FINGERPRINT = {"userAgent", "browserVersion", "pinned_at", "pinned_for"}
+# Config that shapes the browser identity; a pin taken under different values is stale.
+IDENTITY_KEYS = ("driver", "locale", "timezone", "proxy")
 
 
 # Legacy IANA names ICU/Chrome may still report, mapped to current names.
@@ -234,6 +236,20 @@ class ProfileManager:
         self._audit.record(
             "profile.config", actor=actor, target=profile_id, old=old.model_dump(), new=config.model_dump()
         )
+        if self.identity_config(config) != self.identity_config(old):
+            self.repin(profile_id, actor=actor, reason="identity config changed")
+
+    def effective_driver(self, config: ProfileConfig) -> str:
+        return config.driver or self.settings.driver
+
+    def identity_config(self, config: ProfileConfig) -> dict[str, Any]:
+        return {"driver": self.effective_driver(config), "locale": config.locale, "timezone": config.timezone,
+                "proxy": config.proxy.server if config.proxy else None}  # fmt: skip
+
+    def repin(self, profile_id: str, *, actor: str = "admin", reason: str = "") -> None:
+        """Forget the pinned browser identity; the next open pins a fresh one under the current config."""
+        self._db.execute("UPDATE profiles SET fingerprint_json = NULL WHERE id = ?", (profile_id,))
+        self._audit.record("profile.repin", actor=actor, target=profile_id, reason=reason)
 
     @staticmethod
     def _row(r: Any) -> Profile:
@@ -414,6 +430,8 @@ class ProfileManager:
             warnings.append(f"language is {observed.get('language')}, configured {cfg.locale}")
         pinned = profile.fingerprint
         if pinned is None:
+            observed["pinned_at"] = iso()
+            observed["pinned_for"] = self.identity_config(cfg)
             self._db.execute(
                 "UPDATE profiles SET fingerprint_json = ? WHERE id = ?", (json.dumps(observed), profile.id)
             )

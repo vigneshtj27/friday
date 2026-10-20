@@ -178,6 +178,7 @@ def profile_set_proxy(
     # Re-pin the browser identity on the next open (egress/driver changed).
     ctx.db.execute("UPDATE profiles SET fingerprint_json = NULL WHERE id = ?", (profile_id,))
     typer.echo(f"{profile_id}: proxy {server}, driver {cfg.driver or ctx.settings.driver}")
+    _doctor_after_change(profile_id)
 
 
 @profile_app.command("set-driver")
@@ -188,6 +189,57 @@ def profile_set_driver(profile_id: str, driver: str):
     ctx.profiles.update_config(profile_id, profile.config.model_copy(update={"driver": driver}), actor="cli")
     ctx.db.execute("UPDATE profiles SET fingerprint_json = NULL WHERE id = ?", (profile_id,))
     typer.echo(f"{profile_id}: driver {driver}")
+    _doctor_after_change(profile_id)
+
+
+@app.command("preflight")
+def preflight_cmd(
+    profile_id: str,
+    override: Annotated[bool, typer.Option("--override", help="allow ONE sign-in attempt in the next 30 min despite failures")] = False,
+    fresh: Annotated[bool, typer.Option("--fresh", help="look up the egress again (ignore the 15-min cache)")] = False,
+    google: Annotated[bool, typer.Option("--google", help="also require Google (for 'populate the sheet' requests)")] = False,
+):
+    """Check a profile's sign-in prerequisites (driver, proxy, egress, identity pin, OTP, Google)."""
+    ctx = _ctx()
+    rep = asyncio.run(ctx.preflight.check(profile_id, need_google=google, fresh=fresh))
+    for line in rep.lines():
+        typer.echo(line)
+    if override:
+        if rep.ok:
+            typer.echo("All clear; no override needed.")
+        else:
+            until = ctx.preflight.grant_override(profile_id)
+            typer.secho(f"Override granted: the next sign-in on {profile_id} (until {until[:16]}Z) runs despite the failures above. "
+                        "A bounce still counts and starts the backoff.", fg="yellow")  # fmt: skip
+    if not rep.ok and not override:
+        raise typer.Exit(1)
+
+
+@profile_app.command("doctor")
+def profile_doctor(
+    profile_id: str,
+    repin: Annotated[Optional[bool], typer.Option("--repin/--no-repin", help="re-pin a stale identity without asking")] = None,
+):
+    """Check the pinned browser identity against the profile's config, and offer to re-pin a stale one."""
+    from friday.profiles.doctor import examine
+
+    ctx = _ctx()
+    rep = examine(ctx.profiles, ctx.profiles.get(profile_id))
+    for line in rep.lines():
+        typer.echo(line)
+    if rep.needs_repin and (repin if repin is not None else typer.confirm("Re-pin now (the next open records a fresh identity)?", default=True)):
+        ctx.profiles.repin(profile_id, actor="cli", reason="; ".join(rep.issues)[:500])
+        typer.echo(f"{profile_id}: re-pinned; the next open records the identity under the current config.")
+    elif rep.issues and not rep.needs_repin:
+        raise typer.Exit(1)
+
+
+def _doctor_after_change(profile_id: str) -> None:
+    from friday.profiles.doctor import examine
+
+    ctx = _ctx()
+    for line in examine(ctx.profiles, ctx.profiles.get(profile_id)).lines():
+        typer.echo(line)
 
 
 @profile_app.command("set-identity")
@@ -205,6 +257,7 @@ def profile_set_identity(
     ctx.profiles.update_config(profile_id, profile.config.model_copy(update={"locale": locale, "timezone": timezone}), actor="cli")
     ctx.db.execute("UPDATE profiles SET fingerprint_json = NULL WHERE id = ?", (profile_id,))
     typer.echo(f"{profile_id}: locale {locale}, timezone {timezone}")
+    _doctor_after_change(profile_id)
 
 
 @site_app.command("set-otp-senders")

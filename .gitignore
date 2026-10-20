@@ -5,3 +5,4 @@ __pycache__/
 .env
 data/
 friday/web/static/novnc/
+friday/BUILD_INFO

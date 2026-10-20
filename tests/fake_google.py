@@ -157,6 +157,7 @@ class FakeGoogle:
 class FakeAuth:
     def __init__(self, can: bool = True):
         self._can = can
+        self.available = True
 
     def connected(self, purpose: str) -> bool:
         return self._can
@@ -181,6 +182,7 @@ def install(ctx: Any, fake: FakeGoogle) -> None:
     from friday.workspace import Drive, Gmail, GoogleAPI
 
     auth = FakeAuth()
+    ctx.google = auth
     ctx.sheets = SheetsClient(auth, transport=fake.transport)
     api = GoogleAPI(auth, transport=fake.transport)
     ctx.workspace = SimpleNamespace(api=api, gmail=Gmail(api), drive=Drive(api))

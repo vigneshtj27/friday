@@ -211,8 +211,33 @@ class JobRunner:
             # Probes reopen the profile, so they run after it is closed.
             self.submit("diagnose_probes", profile.id, {"report_id": report_id})
 
+    async def _preflight_blocks(self, run_id: str, kind: str, params: dict[str, Any], profile: Any) -> bool:
+        """True if the run must not touch the site (friday/preflight.py). Never counts as a bounce."""
+        from friday.preflight import SIGNIN_KINDS
+
+        ctx = self.ctx
+        if kind not in SIGNIN_KINDS or ctx.settings.preflight == "off":
+            return False
+        rep = await ctx.preflight.check(profile.id, need_google=bool((params.get("then") or {}).get("sheet")))
+        ctx.runs.step(run_id, "preflight", result="; ".join(f"{i.name}: {'ok' if i.ok else 'FAIL'}" for i in rep.items))
+        if rep.ok:
+            return False
+        if ctx.settings.preflight == "warn":
+            log.warning("preflight failed for %s (warn mode): %s", profile.id, [i.name for i in rep.failed])
+            return False
+        if ctx.preflight.take_override(profile.id):
+            ctx.runs.step(run_id, "preflight", result="owner override: one deliberate attempt despite: " + ", ".join(i.name for i in rep.failed))
+            return False
+        ctx.runs.finish(run_id, RunStatus.NEEDS_ATTENTION, f"Preflight blocked the sign-in: {', '.join(i.name for i in rep.failed)}.",
+                        {"preflight": rep.public()})  # fmt: skip
+        ctx.audit.record("preflight.blocked", target=profile.id, run=run_id, failed=[i.name for i in rep.failed])
+        await ctx.notifier.send(rep.chat_message(), None, meta={"kind": "run", "ref": run_id, "profile_id": profile.id})
+        return True
+
     async def _run_browser_job(self, run_id: str, kind: str, params: dict[str, Any], profile: Any) -> str | None:
         ctx = self.ctx
+        if await self._preflight_blocks(run_id, kind, params, profile):
+            return None
         llm = self.llm_factory()
         report_id = None
         async with ctx.profiles.open(profile.id, purpose=kind) as op:

@@ -29,7 +29,7 @@ function renderNav() {
   const counts = state ? { approvals: state.approvals.length, otp: state.otp.length, handoffs: state.handoffs.length } : {};
   $nav.innerHTML = TABS.map(([id, label]) =>
     `<a href="#${id}" class="${route === id ? "on" : ""}">${label}${counts[id] ? `<span class="badge">${counts[id]}</span>` : ""}</a>`).join("");
-  if (state) document.getElementById("meta").textContent = `${state.model} · notify: ${state.notify.join(", ")} · Gmail ${state.gmail_connected ? "connected" : "not connected"}`;
+  if (state) document.getElementById("meta").textContent = `friday ${state.version ? state.version.short : "?"}${state.version && state.version.built_at ? " (" + state.version.built_at.slice(0, 16).replace("T", " ") + ")" : ""} · ${state.model} · notify: ${state.notify.join(", ")} · Gmail ${state.gmail_connected ? "connected" : "not connected"}`;
 }
 
 async function refreshState() {
