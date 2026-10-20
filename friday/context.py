@@ -60,6 +60,7 @@ class AppContext:
     workspace: Any = field(default=None)
     memory: Any = field(default=None)
     tools: Any = field(default=None)
+    scheduler: Any = field(default=None)
     onboarding: Any = field(default=None)
 
     def portal_link(self, fragment: str = "") -> str:
@@ -122,6 +123,9 @@ def build_context(
     api = GoogleAPI(google)
     ctx.workspace = SimpleNamespace(api=api, gmail=Gmail(api), drive=Drive(api))
     ctx.memory = Memory(db, redactor)
+    from friday.scheduler import Scheduler
+
+    ctx.scheduler = Scheduler(ctx)
     from friday.onboarding import Onboarding
 
     ctx.onboarding = Onboarding(ctx)

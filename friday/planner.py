@@ -102,6 +102,9 @@ skips rows already there). For other rows, sheets_append_rows.
 - Memory: when the owner states a lasting fact or preference ("remember...", "my X is Y"), call memory_remember with \
 owner_quote copied exactly from their message. Use what memory already says instead of asking again. If something \
 you need isn't known (which sheet, which account), and you can't look it up, reply with one short question.
+- Reminders ("remind me in 5 minutes / at 6pm to ...") are schedule_create kind reminder; recurring or later work \
+("every Monday, refresh my expense sheet from Amex") is kind job, whose text is the request to run then, written so \
+it stands on its own. Times are in the owner's timezone (in the context). owner_quote is copied from their message.
 - Never ask for passwords, codes or card numbers; new accounts and credentials go through account_setup.
 - Sending email, sharing files, paying, or posting anything others will see: just plan the step; the system asks \
 the owner on a card. If the owner denied something, don't try to achieve it another way.
@@ -248,7 +251,6 @@ class Planner:
 
     def _context(self, request: str, recap: str) -> str:
         ctx = self.ctx
-        today = date.today()
         accounts = []
         for p in ctx.profiles.list():
             site = ctx.sites.get(p.site_id)
@@ -257,8 +259,15 @@ class Planner:
         waiting = len(ctx.broker.pending()) + len(ctx.gate.pending()) + len(ctx.handoffs.list_open())
         google = "connected" if ctx.google.can("sheets") or ctx.google.can("gmail.read") else (
             "not connected (use google_connect purpose workspace)" if ctx.google.available else "not set up on this server")
+        tz = ctx.settings.default_timezone or "UTC"
+        try:
+            from zoneinfo import ZoneInfo
+
+            now = datetime.now(ZoneInfo(tz))
+        except Exception:
+            now = datetime.now()
         parts = [
-            f"Today: {today.isoformat()} ({today.strftime('%A')}), time {datetime.now().strftime('%H:%M')}.",
+            f"Today: {now.date().isoformat()} ({now.strftime('%A')}), time {now.strftime('%H:%M')} in the owner's timezone {tz}.",
             f"Accounts: {', '.join(accounts) or 'none yet'}.",
             f"Google: {google}.",
             f"Saved expense sheet: {json.dumps(sheet) if sheet else 'none'}.",

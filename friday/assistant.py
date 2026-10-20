@@ -50,23 +50,23 @@ class ChatAssistant:
         lines = [f"{'Owner' if r['sender'] == 'owner' else 'friday'}: {r['text'][:400]}" for r in rows[-10:]]
         return "\n".join(lines)
 
-    async def reply(self, text: str) -> str:
-        """Answer one owner message, using tools as needed. Returns the reply text."""
+    async def reply(self, text: str, *, origin: str = "owner") -> str:
+        """Answer one owner message (or a job the owner scheduled), using tools as needed. Returns the reply text."""
         async with self._lock:
             self.busy = True
             self.ctx.chat.store.touch()
             try:
-                return await self._reply(text)
+                return await self._reply(text, origin)
             finally:
                 self.busy = False
                 self.ctx.chat.store.touch()
 
-    async def _reply(self, text: str) -> str:
+    async def _reply(self, text: str, origin: str = "owner") -> str:
         recap = self._recap()
         if self._notes:
             recap += ("\n" if recap else "") + "Since the last message: " + " ".join(self._notes)
             self._notes = []
-        return await self.planner.handle(text, recap=recap)
+        return await self.planner.handle(text, recap=recap, origin=origin)
 
     def status_line(self) -> str | None:
         return self.planner.status_line()

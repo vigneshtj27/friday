@@ -75,7 +75,9 @@ def create_app(ctx: AppContext) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await ctx.notifier.start(ctx.broker.handle_reply)  # chat replies resolve pending OTP requests
+        ctx.scheduler.start()
         yield
+        await ctx.scheduler.stop()
         await ctx.jobs.shutdown()
         await ctx.supervisor.shutdown()
         await ctx.notifier.stop()
