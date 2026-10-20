@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     admin_password_hash: SecretStr | None = None
     cookie_secure: bool = False
     session_ttl_seconds: int = 12 * 3600
-    handoff_ttl_seconds: int = 900
+    handoff_ttl_seconds: int = 1800  # extended while the remote view is connected
 
     @property
     def resolved_profiles_dir(self) -> Path:

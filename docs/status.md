@@ -1,12 +1,12 @@
 # Status: what is verified and what is not
 
-Last updated 2026-10-20.
+Last updated 2026-10-20 (after the first live Amex test).
 
 ## Verified
 
 | What | How | Where |
 |---|---|---|
-| Unit tests (classifier, OTP extraction, TOTP, approval gate, policy, masking, crypto, dedupe and verification, diagnosis ranking, web auth, VNC bridge, injector) | `uv run pytest`: 246 pass | Linux and macOS |
+| Unit tests (classifier, OTP extraction, TOTP, approval gate, policy, masking, crypto, dedupe and verification, diagnosis ranking, web auth, VNC bridge, injector) | `uv run pytest`: 273 pass | Linux and macOS |
 | The exact request sent to the Anthropic API | `tests/test_llm_wire.py`: real SDK against a local fake API | Linux and macOS |
 | Persistent profile in a real browser (cookie survives a restart, secret injection, masked screenshot, pinned fingerprint) | `tests/test_chrome_smoke.py`, both `playwright` and `cdp` drivers | macOS with Google Chrome; Linux Xvfb with Playwright's bundled Chromium 141 |
 | Every login scenario against the mock bank (session reuse, email OTP via Gmail stand-in, SMS OTP by owner reply, TOTP, push, wrong password, silent bounce plus diagnosis, access denied, CAPTCHA handoff), statement fetch with verification and dedupe, payment approval gate, navigation allowlist | `tests/test_e2e_mockbank.py`: 12 pass, using a heuristic stand-in for the model | Linux Xvfb with bundled Chromium |
@@ -21,6 +21,10 @@ Last updated 2026-10-20.
 | Phase 2 acceptance: remembered expense sheet used later without asking (add then remove a test row, only friday's own row removed); Gmail order total → sheet row verified by read-back; impossible request ends in a blocker after 2 replans; a failed check triggers a replan; an email can't plant a memory; "status" answered mid-plan | `tests/test_planner.py` (scripted planner, real registry, gate, memory, fake Google) | Linux |
 | Phase 3 acceptance: "remind me in 5 minutes" fires once when due (and the real background loop fires on its own); a weekly job created, listed and cancelled from the chat; a job runs through the planner; a web page can't schedule anything; missed recurring slots fire once | `tests/test_scheduler.py` | Linux |
 | Phase 4 acceptance, end to end: one chat request asks once for the sheet, remembers it, signs in to a card site in real Chrome, reads its activity page (ARIA grid + pending table), stores the transactions, appends exactly the fetched charges to the right tab (Card column filled, Category/Notes untouched, other tabs untouched), verifies fetched == appended, read-back == appended and the tab's total == the fetched total, shows ≥ 3 progress updates; a repeat adds nothing; a second card named at run time works through the same code | `tests/test_e2e_assistant.py` (real Chromium + mock card site + fake Google; scripted planner and heuristic browser model) | Linux Xvfb, bundled Chromium |
+| Preflight gate: the live Amex state (no patchright, no proxy, GCP egress) fails driver/proxy/egress with fix commands; a blocked run never opens the browser and isn't a bounce; override is one use; datacenter ASN / wrong country / unreachable proxy detected through the proxy; local test sites skip network checks; Google required only for sheet requests; OTP channel chat/sms/email; `--json` for scripts | `tests/test_preflight.py` (fake geo lookup) | Linux |
+| Profile doctor and version stamp: old or drifted pins re-pinned at startup, a mismatch under the current config not re-pinned (no loop), config change re-pins; BUILD_INFO read; `/healthz` and `/api/state` carry the version, egress and OTP channel | `tests/test_preflight.py` | Linux |
+| Diagnosis confound: a manual bounce under Playwright/`webdriver: true` is INCONCLUSIVE and points to preflight; under patchright it still discriminates; reports record driver, pinned webdriver and egress | `tests/test_classifier.py` | Linux |
+| Handoffs: extended while watched (and capped), `manual_login` reuses an open one and warns when preflight fails, remote-view page has the typing aid | `tests/test_handoff_web.py` | Linux |
 | Docker image: seeding a profile, a second seed of the same profile refused, remote-view login and handoff round trip, no fingerprint warnings | Manual | Docker Desktop on Apple Silicon (x86 image under emulation) |
 
 How to run the real-browser tests on Linux without Google Chrome installed:
@@ -34,7 +38,9 @@ They need `Xvfb` and `x11vnc` on PATH. When running as root (as in some CI conta
 ## Not verified
 
 - **Real sites.** No real bank, card, utility or shopping site has been driven end to end. The first run on each site is expected to need a manual sign-in (seed) and may need a diagnosis.
-- **Amex end to end.** Not run: the live profile, home egress, Gmail connection and re-seed are owner steps on the deployment (see `runbook.md`); this environment has no access to it. The activity fetch has been tested on fixture pages only, not on a real activity page.
+- **Amex end to end.** The first live test (2026-10-20, build 9857f4d) bounced silently, both automated and by hand, from the GCP egress under plain Playwright. Preflight now blocks that state. Still not run: the home egress (`deploy/egress.sh`), the patchright re-pin and re-seed, and the acceptance in `runbook.md` §5. This environment has no access to the deployment.
+- **`deploy/egress.sh` against a real tailnet.** The script has been syntax-checked, and the preflight `--json` it reads is tested. Tailscale join, the proxy wait and the in-container egress lookup through the tailnet haven't been run.
+- **Typing aid against a real VNC session.** The page and the keysym mapping are in place; key delivery has only been exercised by the existing VNC bridge tests.
 - **Google Sheets and Gmail against Google.** The OAuth flow and the Sheets calls are tested against mocks. Real consent, real API responses (formatting of dates/numbers in your sheet's locale) are not yet verified; the read-back check is there to catch a mismatch on the first real run.
 - **The real model as planner.** Plans, fills and reports are tested with a scripted model; no plan has been produced by the real API yet. The planner prompt and tool descriptions are the least-proven part of the assistant: expect to tune them on the first real requests. Every safety rule is enforced in code, so a bad plan can fail, but not bypass a gate.
 - **Phase 0 on the live deployment.** Not verifiable from here: the Amex profile's driver/locale/proxy settings, the home egress proxy, the Gmail connection and the manual re-seed (see `runbook.md`). `origin/main` also didn't contain the activity fetch and Sheets work when this phase started; it lives on `main-c3c2du`.

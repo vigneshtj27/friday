@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -82,8 +82,8 @@ class Report:
 
     def chat_message(self) -> str:
         bad = self.failed
-        lines = [f"I didn't try to sign in to {self.profile_id}: {len(bad)} prerequisite{'s' if len(bad) > 1 else ''} "
-                 "missing, and every failed attempt counts against the account. Not counted as a bounce."]  # fmt: skip
+        lines = [(f"I didn't try to sign in to {self.profile_id}: {len(bad)} prerequisite{'s' if len(bad) > 1 else ''} "
+                  "missing, and every failed attempt counts against the account. Not counted as a bounce.")]  # fmt: skip
         for i in bad:
             lines.append(f"- {i.name}: {i.detail}")
             lines += [f"  fix: {f}" for f in i.fix]
@@ -157,7 +157,7 @@ class Preflight:
         server = profile.config.proxy.server if profile.config.proxy else None
         cached = self.ctx.prefs.get(key)
         if cached and not fresh and cached.get("proxy") == server and \
-                datetime.fromisoformat(cached["checked_at"]) > datetime.now(timezone.utc) - EGRESS_TTL:  # fmt: skip
+                datetime.fromisoformat(cached["checked_at"]) > datetime.now(UTC) - EGRESS_TTL:  # fmt: skip
             return cached
         try:
             geo = await self._fetch_geo(self._proxy_url(profile) if server else None)
@@ -226,7 +226,7 @@ class Preflight:
     # ---- one deliberate attempt -------------------------------------------------------
 
     def grant_override(self, profile_id: str, *, actor: str = "cli") -> str:
-        until = datetime.now(timezone.utc) + OVERRIDE_TTL
+        until = datetime.now(UTC) + OVERRIDE_TTL
         self.ctx.prefs.set(f"preflight_override:{profile_id}", iso(until))
         self.ctx.audit.record("preflight.override_granted", actor=actor, target=profile_id, until=iso(until))
         return iso(until)
@@ -237,7 +237,7 @@ class Preflight:
         if not until:
             return False
         self.ctx.prefs.set(key, None)  # one attempt
-        if datetime.fromisoformat(until) < datetime.now(timezone.utc):
+        if datetime.fromisoformat(until) < datetime.now(UTC):
             return False
         self.ctx.audit.record("preflight.override_used", actor="owner", target=profile_id)
         return True

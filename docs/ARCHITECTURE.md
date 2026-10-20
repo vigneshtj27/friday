@@ -222,6 +222,17 @@ interactive path bypasses `ToolExecutor._gate`.
   cheapest next experiment. Probes never submit credentials (no lockout risk); the manual-login test
   runs only on request.
 
+Every report also records the **environment** the site saw (effective driver, pinned
+`navigator.webdriver`, proxy, egress IP/ASN). When the driver isn't patchright or the pin carries
+`webdriver: true`, a manual remote-view sign-in is labelled INCONCLUSIVE: the human drives the same
+flagged browser. The next step is then preflight.
+
+- **Preflight (`friday/preflight.py`)** runs before any login, fetch or task run touches a site. It
+  checks driver, proxy, egress through the proxy, identity pin and OTP channel, plus Google for sheet
+  requests. A failure ends the run before the browser opens, posts the fixes to the chat, and is not
+  counted as a bounce. **Profile doctor (`friday/profiles/doctor.py`)** compares the pin
+  (`pinned_for`) with the config; it runs at startup and after identity changes.
+
 This is the subsystem that produced the real Amex finding: `navigator.webdriver=true` + a
 datacenter IP + an en-GB locale on an Indian IP → an Akamai 403 at the edge. The fix (patchright,
 consistent locale, per-profile proxy) came straight from the ranked report.
@@ -295,7 +306,8 @@ the backstop), and that site notes can never become instructions.
 - **Remote-view handoff (`handoff/`)** — when a human is needed, friday posts a card linking to an
   authenticated noVNC view of that exact browser session (WebSocket↔VNC bridge, localhost-bound VNC).
   The owner finishes the step and clicks Done; the agent resumes in the same profile. This is also how
-  a profile is first seeded by a manual login.
+  a profile is first seeded by a manual login. A connected view keeps the handoff alive, and a typing
+  box sends text as RFB key events when the canvas doesn't get the keyboard.
 - **`audit.py`** — append-only, **hash-chained** audit log of every action and every secret use (by
   name). The chain is verifiable; the portal shows whether it is intact.
 

@@ -6,6 +6,7 @@ profiles from anywhere through an authenticated remote view.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -285,7 +286,10 @@ def create_app(ctx: AppContext) -> FastAPI:
             cfg = json.dumps({"path": f"/handoff/{h.id}/vnc", "password": h.vnc.password})
             body = (
                 bar
-                + f"""<div id="screen"></div>
+                + f"""<form id="type-form" class="bar" autocomplete="off"><label class="muted" for="type-text">Type into the browser (click the field in the browser first):</label>
+<input id="type-text" type="password" class="grow" spellcheck="false" aria-label="Text to type into the remote browser">
+<label class="muted"><input id="type-enter" type="checkbox"> then Enter</label><button>Type</button></form>
+<div id="screen"></div>
 <script type="module">
 import RFB from '/static/novnc/core/rfb.js';
 const cfg = {cfg};
@@ -294,6 +298,16 @@ const rfb = new RFB(document.getElementById('screen'), `${{proto}}://${{location
   {{credentials: {{password: cfg.password}}}});
 rfb.scaleViewport = true;
 rfb.addEventListener('disconnect', () => document.getElementById('screen').textContent = 'Disconnected.');
+// Typing aid: sends each character as a key press (works where the canvas doesn't get the keyboard).
+const keysym = (c) => c === '\\n' ? 0xff0d : c === '\\t' ? 0xff09 : c.codePointAt(0) < 0x100 ? c.codePointAt(0) : 0x01000000 + c.codePointAt(0);
+document.getElementById('type-form').addEventListener('submit', (e) => {{
+  e.preventDefault();
+  const box = document.getElementById('type-text');
+  for (const c of box.value) rfb.sendKey(keysym(c));
+  if (document.getElementById('type-enter').checked) rfb.sendKey(0xff0d, 'Enter');
+  box.value = '';
+  rfb.focus();
+}});
 </script>"""
             )
         return _page(f"friday - {h.profile_id}", body.replace('<div class="bar">', '<div class="bar"><a href="/portal" style="color:#9cf">&larr; portal</a>', 1))
@@ -323,7 +337,16 @@ rfb.addEventListener('disconnect', () => document.getElementById('screen').textC
         offered = ws.headers.get("sec-websocket-protocol", "")
         await ws.accept(subprotocol="binary" if "binary" in offered else None)
         ctx.audit.record("handoff.view", actor="admin", target=h.profile_id, handoff=h.id)
-        await bridge(ws, h.vnc.host, h.vnc.port)
+
+        async def keep_alive() -> None:
+            while ctx.handoffs.extend(h.id):  # a human is looking at it: don't expire mid-sign-in
+                await asyncio.sleep(60)
+
+        alive = asyncio.create_task(keep_alive())
+        try:
+            await bridge(ws, h.vnc.host, h.vnc.port)
+        finally:
+            alive.cancel()
 
     from friday.web.api import register_api
 

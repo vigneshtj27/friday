@@ -75,6 +75,20 @@ class HandoffManager:
     def list_open(self) -> list[Handoff]:
         return [h for h in list(self._live.values()) if (self.get(h.id) or h).is_open]
 
+    def open_for(self, profile_id: str) -> Handoff | None:
+        return next((h for h in self.list_open() if h.profile_id == profile_id), None)
+
+    def extend(self, handoff_id: str, seconds: int | None = None, *, cap_seconds: int = 4 * 3600) -> bool:
+        """Keep an open handoff alive (the remote view is connected): expiry moves to now + ttl, capped from creation."""
+        h = self.get(handoff_id)
+        if h is None or not h.is_open:
+            return False
+        until = min(utcnow() + timedelta(seconds=self._ttl if seconds is None else seconds), h.created_at + timedelta(seconds=cap_seconds))
+        if until > h.expires_at:
+            h.expires_at = until
+            self._db.execute("UPDATE handoffs SET expires_at = ? WHERE id = ?", (iso(until), h.id))
+        return True
+
     def complete(self, handoff_id: str, *, actor: str = "admin") -> bool:
         h = self.get(handoff_id)
         if h is None or not h.is_open:
@@ -100,10 +114,14 @@ class HandoffManager:
 
     async def wait(self, handoff_id: str) -> HandoffState:
         h = self._live[handoff_id]
-        remaining = (h.expires_at - utcnow()).total_seconds()
-        try:
-            await asyncio.wait_for(h._event.wait(), max(remaining, 0))
-        except TimeoutError:
-            self.get(handoff_id)  # marks expired
+        while not h._event.is_set():
+            remaining = (h.expires_at - utcnow()).total_seconds()  # re-read: extend() may have moved it
+            if remaining <= 0:
+                self.get(handoff_id)  # marks expired
+                break
+            try:
+                await asyncio.wait_for(h._event.wait(), remaining)
+            except TimeoutError:
+                pass
         self._live.pop(handoff_id, None)
         return h.state

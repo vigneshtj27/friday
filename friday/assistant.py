@@ -243,10 +243,19 @@ class ChatAssistant:
             return {"connected": False, "note": "A connect link is now in the chat."}
         if name == "manual_login":
             p = self._profile(args["account"])
-            h = await ctx.supervisor.start_seed(p.id, actor="assistant")
+            h = ctx.handoffs.open_for(p.id)  # re-checked now: an old card in the chat may have expired
+            reused = h is not None
+            if h is None:
+                h = await ctx.supervisor.start_seed(p.id, actor="assistant")
             await ctx.chat.send(f"Sign in to {p.id} yourself in this browser, then tap I'm done.", ctx.handoffs.link(h),
                                 meta={"kind": "handoff", "ref": h.id, "profile_id": p.id})  # fmt: skip
-            return {"handoff": "posted", "note": "A remote-view card is in the chat."}
+            out = {"handoff": "posted", "reused_open_browser": reused, "open_until": h.expires_at.strftime("%H:%M UTC"),
+                   "note": "A fresh remote-view card is in the chat."}  # fmt: skip
+            pf = ctx.prefs.get(f"preflight:{p.id}")
+            if pf and not pf.get("ok"):
+                out["warning"] = ("preflight fails for this account (" + ", ".join(i["name"] for i in pf["items"] if not i["ok"])
+                                  + "): a manual sign-in from this browser is likely to bounce too and still counts as an attempt")  # fmt: skip
+            return out
         raise ValueError(f"unknown tool {name}")
 
     async def _find_site(self, provider: str) -> Any:
