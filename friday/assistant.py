@@ -190,7 +190,7 @@ TOOLS = [
     _tool("sheets_append", "Append transactions already stored for one account and range to the saved expense sheet, then read it back.",
           {"account": {"type": "string"}, "start": DATE, "end": DATE}, ["account", "start", "end"]),
     _tool("connect_google", "Post a link that lets the owner connect Google (gmail: read codes; sheets: expense sheet).",
-          {"purpose": {"type": "string", "enum": ["gmail", "sheets"]}}, ["purpose"]),
+          {"purpose": {"type": "string", "enum": ["workspace", "gmail", "sheets"]}}, ["purpose"]),
     _tool("manual_login", "Open the account's browser so the owner can sign in by hand once (remote view card).",
           {"account": {"type": "string"}}, ["account"]),
 ]
@@ -452,7 +452,8 @@ class ChatAssistant:
             if ctx.google.connected(purpose):
                 return {"connected": True}
             link = f"{ctx.settings.public_base_url.rstrip('/')}/oauth/google/start?purpose={purpose}"
-            what = "read the one-time codes Amex and others email you" if purpose == "gmail" else "update your expense sheet"
+            what = {"gmail": "read the one-time codes sites email you", "sheets": "update your expense sheet",
+                    "workspace": "use your Sheets, Gmail and Drive"}[purpose]  # fmt: skip
             await ctx.chat.send(f"Connect Google so I can {what}: {link}", None)
             return {"connected": False, "note": "A connect link is now in the chat."}
         if name == "manual_login":

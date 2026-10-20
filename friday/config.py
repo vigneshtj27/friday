@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     model: str = "claude-opus-5-5"
     model_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     model_fallbacks: bool = True
+    # Writes private to the owner (own sheet, drafts, memory) run without a card unless this is on.
+    # Sends, shares, spending and anything other people see always need the owner's approval.
+    approve_private_writes: bool = False
+    planner_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     chat_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"  # the chat assistant: quick replies
 
     # agent limits and pacing

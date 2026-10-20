@@ -35,6 +35,7 @@ function toast(text) {
 // ---- formatting ---------------------------------------------------------
 
 const ICONS = {
+  plan: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11"/><path d="M9 12h11"/><path d="M9 18h11"/><path d="m3 6 1 1 2-2"/><path d="m3 12 1 1 2-2"/><path d="M3 18h3"/></svg>',
   otp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3"/><path d="m17 6 3 3"/><path d="m14 9 2 2"/></svg>',
   approval: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg>',
   handoff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 22h8"/><path d="M12 18v4"/></svg>',
@@ -59,6 +60,7 @@ const STATUS = {
   denied: ["Denied", "bad"], expired: ["Expired", ""], cancelled: ["Cancelled", ""], done: ["Done", "good"], saved: ["Saved", "good"],
   succeeded: ["Succeeded", "good"], failed: ["Failed", "bad"], blocked: ["Blocked", "bad"],
   needs_attention: ["Needs attention", "pending"], running: ["Running", "pending"], queued: ["Queued", ""],
+  planning: ["Planning", "pending"], stopped: ["Stopped", "bad"],
 };
 function pill(status) {
   const [label, cls] = STATUS[status] || [String(status || "").replace(/_/g, " "), ""];
@@ -137,6 +139,13 @@ function cardHTML(m) {
           <button class="btn" type="button" data-setup-cancel="${esc(m.ref)}">Cancel</button>
           <button class="btn primary" type="submit">${c.new_site ? "Confirm site and save" : "Save and continue"}</button></div>
       </form></div>`;
+  }
+  if (m.kind === "plan") {
+    const mark = { done: "✓", running: "›", failed: "✕", pending: "·", skipped: "–" };
+    const steps = (c.steps || []).map((s) => `<li class="pstep ${esc(s.status)}"><span class="pmark">${mark[s.status] || "·"}</span>${esc(s.progress)}${s.status === "failed" && s.detail ? `<div class="card-sub">${esc(s.detail)}</div>` : ""}</li>`).join("");
+    const last = (c.events || []).slice(-3).map((e) => `<div class="card-sub">${esc(e.text)}</div>`).join("");
+    return head("Task", c.replans ? `${c.replans} replan${c.replans > 1 ? "s" : ""}` : "") + `<div class="card-main">
+      <p>${esc(c.goal || "")}</p><ol class="psteps">${steps}</ol>${live ? last : ""}</div>`;
   }
   if (m.kind === "run") {
     const title = { fetch_statement: "Statement fetch", fetch_activity: "Recent activity", login: "Sign-in", task: "Task" }[c.kind] || "Run";

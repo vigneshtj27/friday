@@ -57,6 +57,9 @@ class AppContext:
     diagnoser: Diagnoser
     transactions: TransactionStore
     jobs: Any = field(default=None)
+    workspace: Any = field(default=None)
+    memory: Any = field(default=None)
+    tools: Any = field(default=None)
     onboarding: Any = field(default=None)
 
     def portal_link(self, fragment: str = "") -> str:
@@ -88,6 +91,7 @@ def build_context(
     google_secret = settings.google_client_secret.get_secret_value() if settings.google_client_secret else None
     gmail = GmailClient(settings.google_client_id, google_secret, vault)
     google = GoogleAuth(settings.google_client_id, google_secret, vault)
+    gmail.google = google
     broker = OtpBroker(
         db, audit, vault, redactor, notifier, gmail,
         owner_timeout=settings.otp_timeout_seconds, email_timeout=settings.email_otp_timeout_seconds,
@@ -110,6 +114,14 @@ def build_context(
 
         llm_factory = lambda: default_llm(settings)  # noqa: E731
     ctx.jobs = JobRunner(ctx, llm_factory)
+    from types import SimpleNamespace
+
+    from friday.memory import Memory
+    from friday.workspace import Drive, Gmail, GoogleAPI
+
+    api = GoogleAPI(google)
+    ctx.workspace = SimpleNamespace(api=api, gmail=Gmail(api), drive=Drive(api))
+    ctx.memory = Memory(db, redactor)
     from friday.onboarding import Onboarding
 
     ctx.onboarding = Onboarding(ctx)
@@ -119,6 +131,9 @@ def build_context(
         chat_llm_factory = lambda: AnthropicLLM(  # noqa: E731
             settings.model, effort=settings.chat_effort, fallbacks=settings.model_fallbacks
         )
+    from friday.tools import build_registry
+
+    ctx.tools = build_registry(ctx, chat_llm_factory or None)
     if chat_llm_factory is not False:
         from friday.assistant import ChatAssistant
 

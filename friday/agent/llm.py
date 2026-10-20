@@ -60,7 +60,7 @@ class LLM(Protocol):
 
     async def complete(self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse: ...
 
-    async def json(self, system: str, content: list[dict[str, Any]] | str, schema: dict[str, Any]) -> tuple[dict[str, Any], float]: ...
+    async def json(self, system: str, content: list[dict[str, Any]] | str, schema: dict[str, Any], **kw: Any) -> tuple[dict[str, Any], float]: ...
 
 
 def _block_get(block: Any, key: str, default: Any = None) -> Any:
@@ -127,14 +127,16 @@ class AnthropicLLM:
         uses, text = parse_blocks(resp.content)
         return LLMResponse(list(resp.content), uses, text, resp.stop_reason, usage, cost_of(resp.model, usage))
 
-    async def json(self, system: str, content: list[dict[str, Any]] | str, schema: dict[str, Any]) -> tuple[dict[str, Any], float]:
+    async def json(
+        self, system: str, content: list[dict[str, Any]] | str, schema: dict[str, Any], *, effort: str = "low", max_tokens: int = 4000
+    ) -> tuple[dict[str, Any], float]:
         resp = await self.client.beta.messages.create(
             model=self.model,
-            max_tokens=4000,
+            max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": content}],
             thinking={"type": "adaptive"},
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
+            output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
             **self._extra(),
         )
         if resp.stop_reason == "refusal":

@@ -81,8 +81,12 @@ class GmailClient:
         self.vault = vault
         self._token: tuple[str, float] | None = None
 
+    google: Any = None  # friday.google_oauth.GoogleAuth, set by the app context: a workspace grant also reads mail
+
     @property
     def configured(self) -> bool:
+        if self.google is not None and self.google.can("gmail.read"):
+            return True
         return bool(self.client_id and self.vault.exists(REFRESH_SECRET))
 
     async def exchange_code(self, code: str, verifier: str, redirect_uri: str) -> None:
@@ -107,6 +111,8 @@ class GmailClient:
         self.vault.put(REFRESH_SECRET, data["refresh_token"], kind=SecretKind.OTHER, actor="admin")
 
     async def _access_token(self, http: httpx.AsyncClient) -> str:
+        if not self.vault.exists(REFRESH_SECRET) and self.google is not None:
+            return await self.google.token_for("gmail.read", http)
         if self._token and self._token[1] > time.time() + 60:
             return self._token[0]
         refresh = self.vault.reveal(REFRESH_SECRET, purpose="gmail.refresh", actor="system")

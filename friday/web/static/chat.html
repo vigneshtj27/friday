@@ -98,6 +98,12 @@ header{position:sticky;top:0;z-index:5;background:rgba(255,255,255,.86);backdrop
 .code:focus{border-color:var(--ink);box-shadow:0 0 0 3px rgba(24,24,27,.08)}
 .err{color:var(--bad);font-size:13px;margin-top:8px}
 
+/* plan card */
+.psteps{list-style:none;margin:0 0 6px;padding:0}
+.pstep{padding:3px 0;color:var(--muted)}
+.pstep.done{color:var(--text)} .pstep.running{color:var(--text);font-weight:550} .pstep.failed{color:var(--bad)}
+.pmark{display:inline-block;width:18px;color:var(--faint)} .pstep.done .pmark{color:var(--ok)} .pstep.running .pmark{color:var(--warn)}
+
 /* typing */
 .typing,.dots{display:inline-flex;gap:4px;align-items:center}
 .typing{padding:10px 0}

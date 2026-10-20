@@ -193,6 +193,40 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL
     );
     """,
+    """
+    CREATE TABLE sheet_rows (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        spreadsheet TEXT NOT NULL,
+        tab TEXT NOT NULL,
+        values_json TEXT NOT NULL,
+        plan_id TEXT,
+        created_at TEXT NOT NULL,
+        removed_at TEXT
+    );
+    CREATE INDEX sheet_rows_tab ON sheet_rows(spreadsheet, tab);
+    """,
+    """
+    CREATE TABLE memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        subject TEXT,
+        text TEXT NOT NULL,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        forgotten_at TEXT
+    );
+    """,
+    """
+    CREATE TABLE plans (
+        id TEXT PRIMARY KEY,
+        request TEXT NOT NULL,
+        goal TEXT,
+        status TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 

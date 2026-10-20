@@ -1,8 +1,10 @@
 """Google OAuth for the owner, from the portal (no terminal on the server needed).
 
-Two separate grants, each with only what it needs:
-  * gmail  - gmail.readonly, to read emailed one-time codes (friday.otp.gmail)
-  * sheets - spreadsheets + drive.metadata.readonly, to list sheets, read tabs, append rows
+Grants (each feature uses the first connected grant that covers it, see CAPABILITIES):
+  * workspace - the general assistant: Sheets, Gmail read/compose/send (send is approval-gated in
+                code), Drive read + files friday creates
+  * gmail     - gmail.readonly only, for emailed one-time codes (friday.otp.gmail)
+  * sheets    - spreadsheets + drive.metadata.readonly (the narrower grant from before)
 
 Refresh tokens live in the vault under system/google/..., a namespace no site
 profile can reach (the "system" site id is reserved), so the injector can never
@@ -37,6 +39,24 @@ PURPOSES: dict[str, dict[str, Any]] = {
         "secret": "system/google/sheets-refresh-token",
         "label": "Google Sheets",
     },
+    "workspace": {
+        "scopes": [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/drive.file",
+        ],
+        "secret": "system/google/oauth-token",
+        "label": "Google (Sheets, Gmail, Drive)",
+    },
+}
+# capability -> grants that cover it, preferred first
+CAPABILITIES: dict[str, list[str]] = {
+    "sheets": ["workspace", "sheets"],
+    "drive.list": ["workspace", "sheets"],
+    "drive": ["workspace"],
+    "gmail.read": ["workspace", "gmail"],
+    "gmail.write": ["workspace"],
 }
 STATE_TTL = 600
 
@@ -63,6 +83,19 @@ class GoogleAuth:
 
     def connected(self, purpose: str) -> bool:
         return bool(self.client_id and self.vault.exists(PURPOSES[purpose]["secret"]))
+
+    def grant_for(self, capability: str) -> str | None:
+        """The first connected grant that covers a capability (see CAPABILITIES), or None."""
+        return next((g for g in CAPABILITIES[capability] if self.connected(g)), None)
+
+    def can(self, capability: str) -> bool:
+        return self.grant_for(capability) is not None
+
+    async def token_for(self, capability: str, http: httpx.AsyncClient) -> str:
+        grant = self.grant_for(capability)
+        if grant is None:
+            raise PermissionError(f"Google isn't connected for {capability}: connect Google (workspace) first")
+        return await self.access_token(grant, http)
 
     def start(self, purpose: str, redirect_uri: str) -> str:
         if purpose not in PURPOSES:

@@ -24,7 +24,7 @@ from urllib.parse import quote
 import httpx
 
 from friday.capabilities.activity import parse_activity_date
-from friday.capabilities.transactions import infer_dayfirst, parse_amount
+from friday.capabilities.transactions import infer_dayfirst, parse_amount, parse_date
 
 SHEETS = "https://sheets.googleapis.com/v4/spreadsheets"
 DRIVE = "https://www.googleapis.com/drive/v3/files"
@@ -66,6 +66,28 @@ def safe_text(s: str) -> str:
     """Text from a web page must never become a formula."""
     s = s.replace("\n", " ").strip()
     return "'" + s if s[:1] in ("=", "+", "-", "@") else s
+
+
+def _norm_cell(v: Any) -> tuple[str, Any]:
+    """A cell's value, ignoring display format: full dates as dates, amounts as 2-dp numbers, text lowercased."""
+    s = str(v).strip().lstrip("'")
+    if not s:
+        return ("empty", "")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{1,2} [A-Za-z]{3,9},? \d{4}|[A-Za-z]{3,9} \d{1,2},? \d{4}", s):
+        d = parse_date(s, dayfirst=True)
+        if d is not None:
+            return ("date", d)
+    if re.fullmatch(r"[-(]?[^\w\s]{0,2}\s?[\d,]+(\.\d+)?\)?", s):
+        a = parse_amount(s)
+        if a is not None:
+            return ("number", f"{(-a[0] if s.startswith(('-', '(')) else a[0]):.2f}")
+    return ("text", re.sub(r"\s+", " ", s.lower()))
+
+
+def cells_match(written: list[Any], shown: list[Any]) -> bool:
+    """Is `shown` (as Sheets displays it) the row friday wrote? Dates and numbers compare by value."""
+    shown = list(shown) + [""] * max(0, len(written) - len(shown))
+    return all(_norm_cell(w) == _norm_cell(s) for w, s in zip(written, shown) if str(w).strip())
 
 
 def find_header(values: list[list[str]]) -> int:
@@ -223,13 +245,13 @@ class SheetsClient:
 
     @property
     def configured(self) -> bool:
-        return self.auth.connected("sheets")
+        return self.auth.can("sheets")
 
     async def _req(self, method: str, url: str, **kw: Any) -> Any:
         if not self.configured:
             raise SheetsError("Google Sheets is not connected; open the connect link first")
         async with httpx.AsyncClient(timeout=30, transport=self._transport) as http:
-            token = await self.auth.access_token("sheets", http)
+            token = await self.auth.token_for("drive.list" if url.startswith(DRIVE) else "sheets", http)
             r = await http.request(method, url, headers={"Authorization": f"Bearer {token}"}, **kw)
         if r.status_code in (403, 404):
             raise SheetsError(f"Google said {r.status_code}: no such spreadsheet or tab, or no access to it")
@@ -247,9 +269,26 @@ class SheetsClient:
     async def tabs(self, sid: str) -> list[dict[str, Any]]:
         data = await self._req("GET", f"{SHEETS}/{sid}", params={"fields": "properties.title,sheets.properties"})
         return [
-            {"title": s["properties"]["title"], "rows": s["properties"].get("gridProperties", {}).get("rowCount")}
+            {"title": s["properties"]["title"], "sheet_id": s["properties"].get("sheetId"),
+             "rows": s["properties"].get("gridProperties", {}).get("rowCount")}  # fmt: skip
             for s in data.get("sheets", [])
         ]
+
+    async def title(self, sid: str) -> str:
+        data = await self._req("GET", f"{SHEETS}/{sid}", params={"fields": "properties.title"})
+        return str((data.get("properties") or {}).get("title") or "")
+
+    async def add_tab(self, sid: str, title: str) -> dict[str, Any]:
+        d = await self._req("POST", f"{SHEETS}/{sid}:batchUpdate", json={"requests": [{"addSheet": {"properties": {"title": title}}}]})
+        props = ((d.get("replies") or [{}])[0].get("addSheet") or {}).get("properties") or {}
+        return {"title": props.get("title", title), "sheet_id": props.get("sheetId")}
+
+    async def delete_rows(self, sid: str, sheet_id: int, row_indexes: list[int]) -> None:
+        """Delete whole rows by 0-based index, bottom-up so indexes stay valid."""
+        reqs = [{"deleteDimension": {"range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": i, "endIndex": i + 1}}}
+                for i in sorted(set(row_indexes), reverse=True)]
+        if reqs:
+            await self._req("POST", f"{SHEETS}/{sid}:batchUpdate", json={"requests": reqs})
 
     async def read(self, sid: str, tab: str) -> list[list[str]]:
         data = await self._req("GET", f"{SHEETS}/{sid}/values/{quote(a1_tab(tab))}",

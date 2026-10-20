@@ -71,7 +71,13 @@ class FakeAuth:
     def connected(self, purpose):
         return True
 
+    def can(self, capability):
+        return True
+
     async def access_token(self, purpose, http):
+        return "tok"
+
+    async def token_for(self, capability, http):
         return "tok"
 
 

@@ -52,6 +52,7 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
             sorted(h.id for h in ctx.handoffs.list_open()),
             sorted(r["id"] for r in ctx.onboarding.pending()) if ctx.onboarding else [],
             sorted(ctx.jobs.active()) if ctx.jobs else [],
+            [tuple(r) for r in ctx.db.query("SELECT id, updated_at FROM plans WHERE status IN ('planning', 'running')")],
             typing(),
         ]
         return hashlib.sha256(json.dumps(live).encode()).hexdigest()[:16]
@@ -83,6 +84,13 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
                     "reason": r["reason"], "remote_view": bool(h and h.vnc), "link": f"/handoff/{ref}"}  # fmt: skip
         if kind == "setup":
             return ctx.onboarding.card(ref)
+        if kind == "plan":
+            r = ctx.db.query_one("SELECT status, state_json FROM plans WHERE id = ?", (ref,))
+            if r is None:
+                return None
+            st = json.loads(r["state_json"])
+            return {"status": r["status"], "goal": st.get("goal"), "steps": st.get("steps", []), "events": st.get("events", [])[-5:],
+                    "replans": st.get("replans", 0)}  # fmt: skip
         if kind == "run":
             r = ctx.runs.get(ref)
             if r is None:
