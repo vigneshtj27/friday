@@ -7,7 +7,7 @@ gcloud auth login
 deploy/gcp/deploy.sh
 ```
 
-On the first run it asks for a portal password and your Anthropic API key (or reads `FRIDAY_PORTAL_PASSWORD` and `ANTHROPIC_API_KEY`). Both go straight into Secret Manager. Later runs keep what exists and ship the current `git HEAD`.
+On the first run it asks for a portal password and your Anthropic API key (or reads `FRIDAY_PORTAL_PASSWORD` and `ANTHROPIC_API_KEY`). Both go straight into Secret Manager. Later runs keep what exists and ship GitHub's `main` branch (`origin/main`, fetched first). Push to `main` before deploying; to ship a local commit instead, set `DEPLOY_REF=HEAD`.
 
 Open the portal:
 
@@ -45,7 +45,7 @@ Roughly $60–70 a month at on-demand prices, mostly the VM. Stop the VM when yo
 
 | Task | Command |
 |---|---|
-| Deploy new code | `deploy/gcp/deploy.sh ship` |
+| Deploy new code (push to `main` first) | `./deploy.sh` or `deploy/gcp/deploy.sh ship` |
 | Logs | `gcloud compute ssh rv-fri --zone=asia-south1-a --tunnel-through-iap -- 'cd /opt/friday/app && sudo docker compose logs -f'` |
 | First-boot log | `... -- sudo tail -100 /var/log/rv-fri-startup.log` |
 | Stop / start | `gcloud compute instances stop rv-fri --zone=asia-south1-a` / `start` |
@@ -83,7 +83,7 @@ app's secrets (the VM reads them from Secret Manager as before).
 Set it up once, with your own gcloud login, naming the branch whose pushes should deploy:
 
 ```bash
-deploy/gcp/setup-cloudbuild.sh main-c3c2du
+deploy/gcp/setup-cloudbuild.sh main
 ```
 
 **The one manual step.** On the first run the script creates the GitHub connection
@@ -110,7 +110,7 @@ Watch builds:
 | Builds in the console | https://console.cloud.google.com/cloud-build/builds;region=asia-south1?project=rv-experiments |
 | Recent builds | `gcloud builds list --region=asia-south1 --project=rv-experiments --limit=5` |
 | Follow one | `gcloud builds log --stream BUILD_ID --region=asia-south1 --project=rv-experiments` |
-| Deploy without pushing | `gcloud builds triggers run rv-fri-deploy --region=asia-south1 --branch=main-c3c2du --project=rv-experiments` |
+| Deploy without pushing | `gcloud builds triggers run rv-fri-deploy --region=asia-south1 --branch=main --project=rv-experiments` |
 
 **Builds don't overlap on the VM.** Cloud Build itself will run two builds at once if you push
 twice quickly, but `deploy.sh ship` takes a lock (`flock /var/lock/rv-fri-deploy`) on the VM

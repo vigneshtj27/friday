@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Deploy friday to one Compute Engine VM. Safe to re-run: existing resources are
-# kept, and the app is rebuilt from the current git HEAD.
+# kept, and the app is rebuilt from GitHub's main branch (origin/main, fetched
+# first; set DEPLOY_REF=HEAD to ship a local commit instead).
 #
 #   deploy/gcp/deploy.sh            # create or update everything, ship the code
 #   deploy/gcp/deploy.sh ship       # only ship the code and restart
@@ -35,6 +36,7 @@ DATA_DISK=$TAG-data
 SA_NAME=$TAG-vm
 SA="$SA_NAME@$PROJECT.iam.gserviceaccount.com"
 SECRETS=(rv-fri-master-key rv-fri-admin-password-hash rv-fri-anthropic-api-key)
+DEPLOY_REF=${DEPLOY_REF:-origin/main}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 G="gcloud --project=$PROJECT --quiet"
@@ -148,15 +150,21 @@ ensure_vm() {
 }
 
 ship() {
-  # Also runs unattended from Cloud Build (cloudbuild.yaml), where the source may
-  # arrive without .git: then COMMIT_SHA names it and the tree is tarred as is.
-  local rev tgz remote
-  rev=${COMMIT_SHA:-$(git -C "$ROOT" rev-parse HEAD)}
+  # Ships DEPLOY_REF (origin/main by default). From Cloud Build (cloudbuild.yaml)
+  # COMMIT_SHA is set and the pushed commit is already checked out, possibly
+  # without .git, in which case the tree is tarred as is.
+  local ref=$DEPLOY_REF rev tgz remote
+  if [ -n "${COMMIT_SHA:-}" ]; then
+    ref=HEAD
+  elif [ "${ref#origin/}" != "$ref" ]; then
+    git -C "$ROOT" fetch -q origin "${ref#origin/}"
+  fi
+  rev=${COMMIT_SHA:-$(git -C "$ROOT" rev-parse "$ref")}
   rev=${rev:0:7}
-  say "Shipping $rev and starting friday (the first build takes a few minutes)"
+  say "Shipping $ref ($rev) and starting friday (the first build takes a few minutes)"
   tgz=$(mktemp "${TMPDIR:-/tmp}/friday-XXXXXX")
-  if git -C "$ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
-    git -C "$ROOT" archive --format=tar.gz -o "$tgz" HEAD
+  if git -C "$ROOT" rev-parse --verify -q "$ref" >/dev/null 2>&1; then
+    git -C "$ROOT" archive --format=tar.gz -o "$tgz" "$ref"
   else
     tar -czf "$tgz" -C "$ROOT" --exclude=./.git .
   fi

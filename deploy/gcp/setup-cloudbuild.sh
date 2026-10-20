@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Push-to-deploy for friday with Cloud Build (no GitHub Actions). Safe to re-run.
 #
-#   deploy/gcp/setup-cloudbuild.sh <branch>     # e.g. main or main-c3c2du
+#   deploy/gcp/setup-cloudbuild.sh <branch>     # normally main
 #
 # Creates, or keeps if present:
 #   - the Cloud Build, IAP and OS Login APIs
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 BRANCH=${1:-}
-[ -n "$BRANCH" ] || { echo "usage: $0 <branch>   (the branch whose pushes deploy, e.g. main-c3c2du)" >&2; exit 2; }
+[ -n "$BRANCH" ] || { echo "usage: $0 <branch>   (the branch whose pushes deploy, normally main)" >&2; exit 2; }
 
 PROJECT=${PROJECT:-rv-experiments}
 REGION=${REGION:-asia-south1}
