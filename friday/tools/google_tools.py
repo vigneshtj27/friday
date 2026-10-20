@@ -125,8 +125,9 @@ class SheetsAppendRows(Tool):
         after = await ctx.sheets.read(sid, tab)
         data_after = [r for r in after[h + 1 :] if any(str(c).strip() for c in r)]
         found = sum(1 for row in out_rows if any(cells_match(row, shown) for shown in data_after))
-        return {"appended": len(out_rows), "found_after": found, "rows_before": before, "rows_after": len(data_after),
-                "ok": found == len(out_rows) and len(data_after) >= before + len(out_rows)}  # fmt: skip
+        ok = found == len(out_rows) and len(data_after) >= before + len(out_rows)
+        return {"appended": len(out_rows), "found_after": found, "rows_before": before, "rows_after": len(data_after), "ok": ok,
+                "verified": [f"read back {found} of {len(out_rows)} new row(s) in '{tab}' ({before} -> {len(data_after)} rows)"] if ok else []}  # fmt: skip
 
 
 class SheetsRemoveAppended(Tool):
@@ -168,8 +169,10 @@ class SheetsRemoveAppended(Tool):
             ctx.db.execute("UPDATE sheet_rows SET removed_at = ? WHERE id = ?", (iso(), i))
         ctx.audit.record("sheets.remove_appended", actor="assistant", target=sid, tab=tab, rows=len(to_delete))
         after = await ctx.sheets.read(sid, tab)
-        return {"removed": len(to_delete), "rows_before": len(values), "rows_after": len(after),
-                "ok": len(after) == len(values) - len(to_delete), "skipped_changed": len(ledger) - len(done)}  # fmt: skip
+        ok = len(after) == len(values) - len(to_delete)
+        return {"removed": len(to_delete), "rows_before": len(values), "rows_after": len(after), "ok": ok,
+                "skipped_changed": len(ledger) - len(done),
+                "verified": [f"'{tab}' read back with {len(to_delete)} fewer row(s)"] if ok else []}  # fmt: skip
 
 
 class SheetsCreateTab(Tool):
@@ -222,9 +225,15 @@ class SheetsAddTransactions(Tool):
             raise ToolError("which tab? pass tab")
         account = call.ctx.chat.assistant._profile(args["account"]).id if call.ctx.chat.assistant else args["account"]
         await call.say(f"Writing {account}'s transactions to '{t['tab']}'")
-        return await export_transactions(call.ctx, spreadsheet=t["spreadsheet"], tab=t["tab"], account=account,
-                                         start=date.fromisoformat(args["start"]), end=date.fromisoformat(args["end"]),
-                                         include_credits=t.get("include_credits", False), column_map=t.get("column_map"))  # fmt: skip
+        v = await export_transactions(call.ctx, spreadsheet=t["spreadsheet"], tab=t["tab"], account=account,
+                                      start=date.fromisoformat(args["start"]), end=date.fromisoformat(args["end"]),
+                                      include_credits=t.get("include_credits", False), column_map=t.get("column_map"))  # fmt: skip
+        if v["ok"]:
+            v["verified"] = [
+                f"read back all {v['appended']} appended row(s) in '{t['tab']}' ({v['rows_before']} -> {v['rows_after']} rows)",
+                f"{v['rows_in_range']} rows dated {args['start']}..{args['end']} in the tab total {v['total_in_range']}",
+            ]
+        return v
 
 
 class SheetsSetExpenseSheet(Tool):

@@ -29,6 +29,7 @@ _CODE_MESSAGE = re.compile(r"[A-Za-z]{0,2}-?\d[\d -]{2,10}\d")
 # Code-like numbers inside a sentence: 5-8 digits, or 3+3 digits. Dates, years, amounts with
 # separators (12,480.00) and card endings (4417) stay readable.
 _CODE_IN_TEXT = re.compile(r"(?<![\w.,/:-])(?:\d{5,8}|\d{3} \d{3})(?![\w.,/:-])")
+STATUS_WORDS = ("status", "what's waiting", "whats waiting", "pending", "progress", "where are you", "how's it going")
 HELP = (
     "I post here whenever a run needs you: a one-time code, an approval, or a step only you can do in the browser. "
     "Reply with just the code when I ask for one. Type \"status\" to see what is waiting."
@@ -145,7 +146,11 @@ class ChatNotifier(Notifier):
         mine = self.store.add("owner", mask_codes(text))
         if looks_like_code(text):
             self.store.add("friday", "Nothing is waiting for a code right now, so I discarded that.")
+        elif self.assistant is not None and self.assistant.busy and text.lower().strip(" ?!.") in STATUS_WORDS:
+            self.store.add("friday", self.assistant.status_line() or (status() if status else "Working on it."))
         elif self.assistant is not None:
+            if self.assistant.busy:
+                self.store.add("friday", "I'm still on the current task; I'll do this right after. Type \"status\" to see where I am.")
             task = asyncio.create_task(self._answer(text))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
@@ -164,7 +169,7 @@ class ChatNotifier(Notifier):
     @staticmethod
     def _fixed_reply(text: str, status: Any) -> str:
         word = text.lower().strip(" ?!.")
-        if word in ("status", "what's waiting", "whats waiting", "pending") and status:
+        if word in STATUS_WORDS and status:
             return status()
         if word in ("help", "hi", "hello", "hey", "?"):
             return HELP

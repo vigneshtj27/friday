@@ -12,7 +12,7 @@ from friday.onboarding import SetupError, validate_proposal
 from friday.web.app import create_app
 
 from .conftest import TEST_PASSWORD
-from .test_assistant import ScriptedLLM, settle
+from .planner_fakes import PlanLLM, plan, settle, step
 
 AMEX = {
     "found": True, "name": "American Express India", "site_id": "amex",
@@ -163,12 +163,11 @@ async def test_assistant_finds_site_and_posts_card_instead_of_sending_owner_away
             assert "amex" in query
             return dict(AMEX)
 
-    llm = ScriptedLLM([
-        ("find_site", {"provider": "amex"}),
-        ("request_setup", {"proposal_id": "p1", "purpose": "to get your October expenses",
-                           "then": {"kind": "fetch_statement", "start": "2026-10-01", "end": "2026-10-18"}}),
-        "I found American Express India. Fill in the card above and I'll fetch October's statement.",
-    ])  # fmt: skip
+    llm = PlanLLM([plan(
+        step("site_find", {"provider": "amex"}),
+        step("account_setup", {"proposal_id": {"$ref": "s1.proposal_id"}, "purpose": "to get your October expenses",
+                               "then": {"kind": "fetch_statement", "start": "2026-10-01", "end": "2026-10-18"}}),
+    )], reports=["I found American Express India. Fill in the card above and I'll fetch October's statement."])  # fmt: skip
     ctx.chat.assistant = ChatAssistant(ctx, lambda: llm)
     ctx.chat.assistant.finder = Finder()
     await ctx.chat.owner_says("get my amex expenses for this month")
@@ -178,8 +177,7 @@ async def test_assistant_finds_site_and_posts_card_instead_of_sending_owner_away
     assert len(setup) == 1 and setup[0]["profile_id"] == "amex.me"
     row = ctx.onboarding.get(setup[0]["ref"])
     assert row["resume"] == {"kind": "fetch_statement", "params": {"start": "2026-10-01", "end": "2026-10-18", "currency": None}}
-    tool_result = json.dumps(llm.calls[1][-1]["content"])
-    assert "untrusted until the owner confirms" in tool_result
+    assert "untrusted until the owner confirms" in llm.report_inputs[0]
     assert "Sites tab" not in msgs[-1]["text"]
 
 
@@ -187,12 +185,12 @@ async def test_start_run_without_credentials_points_to_setup(ctx, monkeypatch):
     from friday.profiles.models import ProfileConfig
 
     ctx.profiles.create("mybank", "me", ProfileConfig())
-    llm = ScriptedLLM([("start_run", {"account": "mybank.me", "kind": "login"}), "ok"])
+    llm = PlanLLM([plan(step("browser_run", {"account": "mybank.me", "kind": "login"})), plan(reply="Fill in the setup card.")])
     ctx.chat.assistant = ChatAssistant(ctx, lambda: llm)
     await ctx.chat.owner_says("sign in to mybank")
     await settle(ctx)
-    err = json.dumps(llm.calls[1][-1]["content"])
-    assert "request_setup" in err and "no saved username or password" in err
+    err = llm.plan_inputs[1]
+    assert "account_setup" in err and "no saved username or password" in err
 
 
 def test_site_checks_on_save(ctx):
@@ -226,11 +224,11 @@ async def test_find_site_repairs_a_broken_site(ctx, monkeypatch):
         async def find(self, query, *, region_hint):
             return dict(AMEX)
 
-    llm = ScriptedLLM([("find_site", {"provider": "amex"}), "ok"])
+    llm = PlanLLM([plan(step("site_find", {"provider": "amex"}))], reports=["ok"])
     ctx.chat.assistant = ChatAssistant(ctx, lambda: llm)
     ctx.chat.assistant.finder = Finder()
     await ctx.chat.owner_says("fix amex")
     await settle(ctx)
-    result = json.loads(llm.calls[1][-1]["content"][0]["content"])
+    result = json.loads(llm.report_inputs[0].split("<untrusted_results>")[1].split("</untrusted_results>")[0])["s1"]
     assert result["site_id"] == "amex" and "repairs" in result and result["domains"] == ["americanexpress.com"]
     assert isinstance(ctx.chat.assistant._proposals["p1"].site(), Site)

@@ -150,7 +150,12 @@ TOOLS: list[Tool] = [
               "Post a secure setup card: the owner confirms the site and types credentials into a form that goes straight "
               "to the vault (never to you). pass site_id (known site) or proposal_id (from site_find), account, purpose.",
               _obj({"site_id": {"type": "string"}, "proposal_id": {"type": "string"}, "account": {"type": "string"},
-                    "purpose": {"type": "string"}}, ["purpose"]), effect="write"),
+                    "purpose": {"type": "string"},
+                    "then": {"type": "object", "description": "job to start once the card is submitted",
+                             "properties": {"kind": {"type": "string", "enum": ["fetch_statement", "fetch_activity", "task", "login"]},
+                                            "start": DATE, "end": DATE, "goal": {"type": "string"},
+                                            "account_type": {"type": "string", "enum": ["card", "bank"]}},
+                             "required": ["kind"]}}, ["purpose"]), effect="write"),
     _Delegate("manual_login", "manual_login", "Open the account's browser for the owner to sign in by hand once.",
               _obj({"account": {"type": "string"}}, ["account"])),
     _Delegate("google_connect", "connect_google",

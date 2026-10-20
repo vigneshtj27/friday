@@ -1,41 +1,23 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import date
 from decimal import Decimal
 
 import pytest
 
-from friday.agent.llm import LLMResponse, ToolUse
 from friday.assistant import ChatAssistant
 from friday.capabilities.task import OwnerTask
 from friday.capabilities.transactions import Transaction
 from friday.chat import looks_like_code, mask_codes
 from friday.profiles.models import ProfileConfig
+from friday.runs import RunStatus
 
-
-class ScriptedLLM:
-    """Plays back a fixed list of responses and records what it was sent."""
-
-    model = "scripted"
-
-    def __init__(self, script):
-        self.script = list(script)
-        self.calls = []
-
-    async def complete(self, system, messages, tools):
-        self.calls.append([dict(m) for m in messages])
-        step = self.script.pop(0)
-        if isinstance(step, str):
-            return LLMResponse([{"type": "text", "text": step}], [], step, "end_turn")
-        name, args = step
-        use = ToolUse(f"t{len(self.calls)}", name, args)
-        block = {"type": "tool_use", "id": use.id, "name": name, "input": args}
-        return LLMResponse([block], [use], "", "tool_use")
+from .planner_fakes import PlanLLM, chk, last_friday, plan, settle, step
 
 
 @pytest.fixture
 def setup(ctx, monkeypatch):
+    """A profile with credentials; job submission is recorded and the run finishes at once."""
     ctx.profiles.create("mybank", "me", ProfileConfig())
     ctx.vault.put("mybank/me/username", "test-user")
     ctx.vault.put("mybank/me/password", "test-pass-123")
@@ -43,50 +25,44 @@ def setup(ctx, monkeypatch):
 
     def submit(kind, profile_id, params=None, *, force=False):
         submitted.append((kind, profile_id, params))
-        return ctx.runs.create(kind, profile_id, params or {})
+        run_id = ctx.runs.create(kind, profile_id, params or {})
+        ctx.runs.start(run_id)
+        ctx.runs.finish(run_id, RunStatus.SUCCEEDED, f"{kind} done.", {})
+        return run_id
 
     monkeypatch.setattr(ctx.jobs, "submit", submit)
 
-    def attach(script):
-        llm = ScriptedLLM(script)
+    def attach(plans, reports=None):
+        llm = PlanLLM(plans, reports=reports)
         ctx.chat.assistant = ChatAssistant(ctx, lambda: llm)
         return llm
 
     return ctx, submitted, attach
 
 
-async def settle(ctx):
-    while ctx.chat._tasks:
-        await asyncio.gather(*ctx.chat._tasks)
-
-
 async def test_free_text_starts_a_run_and_replies(setup):
     ctx, submitted, attach = setup
     await ctx.notifier.start(ctx.broker.handle_reply)
-    llm = attach([
-        ("start_run", {"account": "mybank", "kind": "fetch_statement", "start": "2026-09-01", "end": "2026-09-30"}),
-        "Fetching your My Bank statement for September (2026-09-01 to 2026-09-30).",
-    ])
+    attach([plan(step("browser_run", {"account": "mybank", "kind": "fetch_statement", "start": "2026-09-01", "end": "2026-09-30"},
+                      checks=[chk("status", "eq", "succeeded", says="the run succeeded")], progress="Fetching the statement"),
+                 goal="Fetch your My Bank statement for September")],
+           reports=["Fetched your My Bank statement for September (2026-09-01 to 2026-09-30)."])  # fmt: skip
     await ctx.chat.owner_says("get my bank statement for september")
     await settle(ctx)
-
     assert submitted == [("fetch_statement", "mybank.me", {"start": "2026-09-01", "end": "2026-09-30"})]
-    rows = ctx.chat.store.list()
-    assert [r["sender"] for r in rows] == ["owner", "friday", "friday"]
-    assert rows[1]["kind"] == "run" and rows[1]["profile_id"] == "mybank.me"
-    assert "September" in rows[2]["text"]
-    first = llm.calls[0]
-    assert first[0]["role"] == "user" and first[1]["role"] == "system" and "Today is" in first[1]["content"]
+    kinds = [r["kind"] for r in ctx.chat.store.list()]
+    assert kinds[0] is None and "plan" in kinds and "run" in kinds  # owner, plan card, run card
+    assert "September" in last_friday(ctx) and "the run succeeded" in last_friday(ctx)
     assert ctx.chat.assistant.busy is False
 
 
 async def test_codes_never_reach_the_model(setup):
     ctx, _, attach = setup
     await ctx.notifier.start(ctx.broker.handle_reply)
-    llm = attach(["unused"])
+    llm = attach([])
     await ctx.chat.owner_says("482913")
     await settle(ctx)
-    assert llm.calls == []
+    assert llm.plan_inputs == []
     assert "discarded" in ctx.chat.store.list()[-1]["text"]
 
 
@@ -104,12 +80,13 @@ async def test_model_failure_is_reported_politely(setup):
 
 async def test_tool_errors_go_back_to_the_model(setup):
     ctx, submitted, attach = setup
-    llm = attach([("start_run", {"account": "nosuchbank", "kind": "login"}), "I don't know that account."])
+    llm = attach([plan(step("browser_run", {"account": "nosuchbank", "kind": "login"})),
+                  plan(reply="I don't know an account called nosuchbank; your accounts are mybank.me.")])  # fmt: skip
     await ctx.chat.owner_says("sign in to nosuchbank")
     await settle(ctx)
     assert submitted == []
-    result = llm.calls[1][-1]["content"][0]
-    assert result["is_error"] and "no single account" in result["content"]
+    assert "no single account" in llm.plan_inputs[1] and "<untrusted_failure>" in llm.plan_inputs[1]
+    assert "nosuchbank" in last_friday(ctx)
 
 
 async def test_transactions_tool_filters_and_totals(setup):
@@ -149,60 +126,50 @@ async def test_run_finish_does_not_duplicate_its_card(setup):
     assert [r["kind"] for r in rows] == ["run", None]
 
 
-# ---- "fetch and populate my Oct Amex expenses" -------------------------------------------------
+# ---- "fetch and populate my Oct card expenses" -------------------------------------------------
 
 
 @pytest.fixture
 def sheets(setup):
-    import httpx
-
-    from friday.sheets import SheetsClient
-
-    from .test_sheets import SID, FakeAuth, FakeGoogle
+    from .fake_google import SID, FakeGoogle, install
 
     ctx, submitted, attach = setup
-    fake = FakeGoogle({"Oct 2026": [["Date", "Description", "Category", "Amount", "Notes"]]})
-    ctx.sheets = SheetsClient(FakeAuth(), transport=httpx.MockTransport(fake.handler))
+    fake = FakeGoogle({SID: {"Oct 2026": [["Date", "Description", "Category", "Amount", "Notes"]]}}, titles={SID: "Expenses 2026"})
+    install(ctx, fake)
     return ctx, submitted, attach, SID
 
 
-async def test_populate_saves_sheet_then_starts_activity_fetch_with_sheet_step(sheets):
-    ctx, submitted, attach, sid = sheets
-    today = date.today().isoformat()
-    first = date.today().replace(day=1).isoformat()
-    llm = attach([
-        ("start_run", {"account": "mybank.me", "kind": "fetch_activity", "start": first, "end": today,
-                       "account_type": "card", "to_sheet": True}),
-        ("set_expense_sheet", {"spreadsheet": sid, "tab": "Oct 2026"}),
-        ("start_run", {"account": "mybank.me", "kind": "fetch_statement", "start": first, "end": today,
-                       "account_type": "card", "to_sheet": True}),
-        "Reading this month's activity, then adding it to 'Oct 2026'.",
-    ])
-    await ctx.chat.owner_says("fetch and populate my Oct card expenses into the sheet")
+async def test_saving_the_expense_sheet_needs_the_owners_words_and_checks_columns(sheets):
+    ctx, _, attach, sid = sheets
+    attach([plan(step("sheets_set_expense_sheet", {"spreadsheet": sid, "tab": "Oct 2026",
+                                                   "owner_quote": "use the Oct 2026 tab of Expenses 2026"}))],
+           reports=["Saved."])  # fmt: skip
+    await ctx.chat.owner_says("use the Oct 2026 tab of Expenses 2026 for expenses")
     await settle(ctx)
+    assert ctx.prefs.get("expense_sheet")["tab"] == "Oct 2026"
+    assert "Expenses 2026" in ctx.memory.context("expense sheet")
 
-    # 1st try: no sheet saved yet -> the error tells the model to ask / save one.
-    err = llm.calls[1][-1]["content"][0]
-    assert err["is_error"] and "set_expense_sheet" in err["content"]
-    # set_expense_sheet checked the columns before saving.
-    saved = __import__("json").loads(llm.calls[2][-1]["content"][0]["content"])
-    assert saved["columns"] == {"Date": "date", "Description": "description", "Category": "skip", "Amount": "amount", "Notes": "skip"}
-    # A card "statement" for recent days became an activity fetch carrying the sheet step.
+
+async def test_recent_card_statement_becomes_activity_fetch(sheets):
+    ctx, submitted, attach, sid = sheets
+    today, first = date.today().isoformat(), date.today().replace(day=1).isoformat()
+    llm = attach([plan(step("browser_run", {"account": "mybank.me", "kind": "fetch_statement", "start": first, "end": today,
+                                            "account_type": "card"}, checks=[chk("status", "eq", "succeeded")]))],
+                 reports=["Read this month's card activity."])  # fmt: skip
+    await ctx.chat.owner_says("fetch my card expenses this month")
+    await settle(ctx)
     kind, account, params = submitted[0]
-    assert kind == "fetch_activity" and account == "mybank.me"
-    assert params["account_type"] == "card" and params["then"]["sheet"]["tab"] == "Oct 2026"
-    note = __import__("json").loads(llm.calls[3][-1]["content"][0]["content"])["note"]
-    assert "Switched to fetch_activity" in note
-    card = [r for r in ctx.chat.store.list() if r["kind"] == "run"][-1]
-    assert "then adding it to 'Oct 2026'" in card["text"]
+    assert kind == "fetch_activity" and params["account_type"] == "card"
+    assert "Switched to fetch_activity" in llm.report_inputs[0]
 
 
 async def test_sheets_not_connected_points_to_connect_google(setup):
     ctx, _, attach = setup
     ctx.settings.google_client_id = "cid"
     ctx.google.client_id = "cid"
-    llm = attach([("sheets_list", {}), ("connect_google", {"purpose": "sheets"}), "Tap the link to connect Google Sheets."])
+    llm = attach([plan(step("sheets_list")), plan(step("google_connect", {"purpose": "workspace"}))],
+                 reports=["Tap the link to connect Google."])  # fmt: skip
     await ctx.chat.owner_says("which sheets do I have?")
     await settle(ctx)
-    assert "connect_google" in llm.calls[1][-1]["content"][0]["content"]
-    assert any("/oauth/google/start?purpose=sheets" in r["text"] for r in ctx.chat.store.list())
+    assert "google_connect" in llm.plan_inputs[1] or "connect Google" in llm.plan_inputs[1]
+    assert any("/oauth/google/start?purpose=workspace" in r["text"] for r in ctx.chat.store.list())

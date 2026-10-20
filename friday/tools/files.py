@@ -189,4 +189,5 @@ class TableCompute(Tool):
                       sum_columns=args.get("sum") or [], group_by=args.get("group_by"), sample=int(args.get("sample") or 5))  # fmt: skip
         out["source"] = source
         out["computed_in_code"] = True
+        out["verified"] = [f"computed in code from {out['rows_matched']} matching row(s) of {source}"]
         return out
