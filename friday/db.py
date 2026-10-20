@@ -255,6 +255,10 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._conn.execute("PRAGMA foreign_keys = ON")
+        # A second connection's BEGIN IMMEDIATE waits (up to 5s) for the current writer instead of
+        # raising "database is locked"; this is what keeps the one-use grant consume safe when two
+        # processes race for it.
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
         self._migrate()

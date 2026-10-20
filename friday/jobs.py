@@ -136,6 +136,19 @@ class JobRunner:
     def active(self) -> list[str]:
         return [r for r, t in self._current.items() if not t.done()]
 
+    def has_pending_signin(self, profile_id: str) -> str | None:
+        """A queued or running sign-in run for this profile, if any (its id). Used to refuse
+        issuing a preflight override while a job could pick it up unexpectedly."""
+        from friday.preflight import SIGNIN_KINDS
+
+        placeholders = ",".join("?" * len(SIGNIN_KINDS))
+        row = self.ctx.db.query_one(
+            f"SELECT id FROM runs WHERE profile_id = ? AND status IN ('queued','running')"
+            f" AND kind IN ({placeholders}) ORDER BY created_at DESC LIMIT 1",
+            (profile_id, *SIGNIN_KINDS),
+        )
+        return row["id"] if row else None
+
     async def wait_idle(self) -> None:
         while any(not w.done() for w in self._workers.values()):
             await asyncio.sleep(0.1)
@@ -225,7 +238,7 @@ class JobRunner:
         if ctx.settings.preflight == "warn":
             log.warning("preflight failed for %s (warn mode): %s", profile.id, [i.name for i in rep.failed])
             return False
-        if ctx.preflight.take_override(profile.id):
+        if ctx.preflight.take_override(profile.id, run_id=run_id):
             ctx.runs.step(run_id, "preflight", result="owner override: one deliberate attempt despite: " + ", ".join(i.name for i in rep.failed))
             return False
         ctx.runs.finish(run_id, RunStatus.NEEDS_ATTENTION, f"Preflight blocked the sign-in: {', '.join(i.name for i in rep.failed)}.",

@@ -38,6 +38,11 @@ class ProbesIn(BaseModel):
     names: list[str] | None = None
 
 
+class PreflightGrantIn(BaseModel):
+    confirm_token: str  # the token returned by the matching /preflight check
+    confirm_profile_id: str  # the owner typed the profile id to confirm; must equal the path id
+
+
 def register_api(app: FastAPI, ctx: AppContext, require: Any) -> None:
     deps = [require]
 
@@ -53,6 +58,8 @@ def register_api(app: FastAPI, ctx: AppContext, require: Any) -> None:
                 "running": any(r["profile_id"] == p.id for r in ctx.runs.list(limit=50) if r["id"] in active),
                 "secrets": [m.name.rsplit("/", 1)[-1] for m in ctx.vault.list(p.secret_prefix)],
                 "proxy": p.config.proxy.server if p.config.proxy else None, "timezone": p.config.timezone, "locale": p.config.locale,
+                "driver": p.config.driver, "effective_driver": ctx.profiles.effective_driver(p.config),
+                "override": ctx.preflight.override_status(p.id),
             })  # fmt: skip
         return {
             "profiles": profiles,
@@ -82,6 +89,59 @@ def register_api(app: FastAPI, ctx: AppContext, require: Any) -> None:
         except ProfileNotFound as e:
             raise HTTPException(404, "no such profile") from e
         return ctx.profiles.get(profile_id)
+
+    # ---- preflight: a safe recheck and the deliberate owner override --------------------
+    # All POST; protected by the owner session and the same-origin check in Auth.require. These
+    # are never exposed as model tools, chat commands, SMS hooks or GET requests. A check or a
+    # status read never opens the bank, never logs in and never issues a grant.
+
+    @app.post("/api/profiles/{profile_id}/preflight", dependencies=deps)
+    async def preflight_check(profile_id: str):
+        try:
+            return await ctx.preflight.portal_check(profile_id, fresh=True)
+        except ProfileNotFound as e:
+            raise HTTPException(404, "no such profile") from e
+
+    @app.post("/api/profiles/{profile_id}/preflight/grant", dependencies=deps)
+    async def preflight_grant(profile_id: str, body: PreflightGrantIn):
+        try:
+            out = await ctx.preflight.portal_grant(
+                profile_id, confirm_token=body.confirm_token, confirm_profile_id=body.confirm_profile_id
+            )
+        except ProfileNotFound as e:
+            raise HTTPException(404, "no such profile") from e
+        status = out.get("status")
+        if status == "granted":
+            return out
+        codes = {"mismatch": (400, "the typed profile id does not match"),
+                 "stale": (409, out.get("reason", "confirmation is stale")),
+                 "changed": (409, "the preflight report changed; review it and decide again"),
+                 "busy": (409, f"a sign-in run ({out.get('run_id')}) is already queued or running for this profile; "
+                               "wait for it to finish, then re-check"),
+                 "all_clear": (200, "all checks pass now; no override is needed")}  # fmt: skip
+        code, detail = codes.get(status, (400, "could not grant"))
+        if status in ("all_clear", "changed"):
+            # 200 for all_clear (not an error); 'changed' returns the fresh report with a 409
+            if status == "all_clear":
+                return out
+            raise HTTPException(code, detail={"message": detail, **out})
+        raise HTTPException(code, detail)
+
+    @app.post("/api/profiles/{profile_id}/preflight/cancel", dependencies=deps)
+    async def preflight_cancel(profile_id: str):
+        try:
+            ctx.profiles.get(profile_id)
+        except ProfileNotFound as e:
+            raise HTTPException(404, "no such profile") from e
+        return {"cancelled": ctx.preflight.clear_override(profile_id)}
+
+    @app.post("/api/profiles/{profile_id}/repin", dependencies=deps)
+    async def preflight_repin(profile_id: str):
+        try:
+            ctx.profiles.repin(profile_id, actor="owner", reason="portal re-pin")
+        except ProfileNotFound as e:
+            raise HTTPException(404, "no such profile") from e
+        return {"repinned": True}
 
     @app.post("/api/profiles/{profile_id}/runs", dependencies=deps)
     async def start_run(profile_id: str, body: RunIn):

@@ -144,11 +144,12 @@ into a log, an API response, the audit log, or a model prompt? (Tests `tests/tes
   a private **Xvfb** per open profile plus an **x11vnc** (localhost only, random per-session password,
   `-xkb` so punctuation/shift survive) for the remote-view handoff.
 - **`drivers/`** — pluggable, one Playwright `BrowserContext` API regardless of launch method:
-  - `playwright` — `launch_persistent_context`, real Chrome, Chrome's sandbox *on*, a consistent
-    `locale` set on the context. No stealth. Default.
-  - `patchright` — same API via the Patchright fork; **removes `navigator.webdriver`** and similar
-    automation tells (verified in `tests/test_chrome_smoke.py`). Opt-in per profile, flagged
-    `stealth=True`, and audited on every open. Used only on a diagnosed need.
+  - `patchright` — real Chrome via the Patchright fork; **removes `navigator.webdriver`** and similar
+    automation tells (verified in `tests/test_chrome_smoke.py`). Chrome's sandbox *on*, a consistent
+    `locale`. Not fingerprint spoofing. Flagged `stealth=True` and audited on every open. **Default**,
+    because the preflight gate requires it and no real user's browser exposes `navigator.webdriver`.
+  - `playwright` — `launch_persistent_context`, real Chrome, same sandbox/locale, but leaves
+    `navigator.webdriver = true`. Available per profile or via `FRIDAY_DRIVER` (e.g. for debugging).
   - `cdp` — launches Chrome as a plain process (no `--enable-automation`, none of Playwright's default
     flags) and attaches over CDP. The idea nodriver uses, without a second tool's API.
 - **`agent/isolated.py`** — runs friday's own page scripts (the DOM snapshot walker, table extraction)

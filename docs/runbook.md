@@ -21,6 +21,9 @@ The portal header and `/api/state` (`version`) show the same stamp. If it's old,
 
 ## 1. Preflight
 
+The driver is **patchright by default**, so there is no manual `set-driver` step for normal setup.
+Check a profile's readiness from the portal (**Accounts → Check preflight**) or the CLI:
+
 ```bash
 F preflight amex.me            # per item: ok / FAIL, with the command that fixes each failure
 F preflight amex.me --fresh    # look up the egress again (otherwise cached 15 min)
@@ -28,18 +31,35 @@ F preflight amex.me --fresh    # look up the egress again (otherwise cached 15 m
 
 | Item | Passes when | Fix |
 |---|---|---|
-| driver | the profile uses `patchright` (plain Playwright shows `navigator.webdriver = true`) | `F profile set-driver amex.me patchright` |
+| driver | the profile uses `patchright` (the default; plain Playwright shows `navigator.webdriver = true`) | default; override only with `F profile set-driver amex.me <driver>` |
 | proxy | a proxy is configured | step 2 |
 | egress | the IP seen **through the proxy** is not a datacenter/hosting ASN and is in the profile's country (en-IN / Asia/Kolkata → IN) | step 2 |
-| identity | the pinned fingerprint was taken under the current driver, locale, timezone and proxy, and agrees with them | `F profile doctor amex.me --repin` |
+| identity | the pinned fingerprint was taken under the current driver, locale, timezone and proxy, and agrees with them | **Accounts → Check preflight → Re-pin**, or `F profile doctor amex.me --repin` |
+| browser | the last browser self-check for this proxy showed no IPv4/IPv6/WebRTC leak | `F browser-check amex.me` (also runs in-browser before each sign-in) |
 | otp | always passes; it reports the live channel (email, sms or the chat code card) | optional, step 3 |
 | google | (for "populate the sheet" requests) Google is connected | say "connect Google" in the chat |
 
-A run that fails preflight never opens the site. It posts one chat message listing the failures and fixes, and doesn't count as a bounce or start the backoff. `FRIDAY_PREFLIGHT=warn` only logs; `off` disables the gate. For one deliberate attempt despite failures:
+A run that fails preflight never opens the site. It posts one chat message listing the failures and fixes, and doesn't count as a bounce or start the backoff. `FRIDAY_PREFLIGHT=warn` only logs; `off` disables the gate.
 
-```bash
-F preflight amex.me --override   # the next sign-in in the next 30 minutes runs anyway; a bounce still counts
-```
+**Upgrade note:** making patchright the default changes the *effective* driver of any profile whose
+driver was left unset. The first time the portal starts, the profile doctor flags such a profile's
+old identity pin (it was pinned under playwright) and posts a chat note; re-pin it from **Accounts →
+Check preflight → Re-pin** (or `F profile doctor <id> --repin`) before signing in. Nothing — cookies,
+sessions, secrets — is erased. A deployment that set `FRIDAY_DRIVER=playwright` keeps playwright until
+that line is removed from its `.env`.
+
+### A deliberate one-attempt exception
+
+If the checks fail but you want one sign-in to go ahead anyway (you understand the risk), grant a
+single-use override. **This does not skip any check** — the report still fails; it only lets exactly
+one eligible run proceed despite it, once, for 30 minutes, for that profile.
+
+- Portal: **Accounts → Check preflight → Allow one attempt**, type the account id, confirm. Then start
+  the run yourself from Accounts. It won't be granted while a sign-in is already queued or running.
+- CLI fallback: `F preflight amex.me --override`.
+
+A bounce still counts and starts the backoff, and the override does **not** bypass the in-browser leak
+check, rate limits, approvals, OTP, or a CAPTCHA/403 stop.
 
 ## 2. One stable home egress (no rotation)
 

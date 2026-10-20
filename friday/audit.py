@@ -35,18 +35,23 @@ class AuditLog:
         self._redactor = redactor
 
     def record(self, action: str, *, actor: str = "system", target: str | None = None, **details: Any) -> None:
+        with self._db.tx() as c:
+            self.record_c(c, action, actor=actor, target=target, **details)
+
+    def record_c(self, c: Any, action: str, *, actor: str = "system", target: str | None = None, **details: Any) -> None:
+        """Append an entry using a connection already inside a transaction, so a caller can make
+        some other change and the audit of it atomic (e.g. consuming a one-use grant)."""
         details_json = canonical_json(self._redactor.redact_obj(details))
         target = self._redactor.redact(target) if target else target
         ts = iso()
-        with self._db.tx() as c:
-            row = c.execute("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
-            prev = row[0] if row else GENESIS
-            h = _entry_hash(prev, ts, actor, action, target, details_json)
-            c.execute(
-                "INSERT INTO audit_log (ts, actor, action, target, details_json, prev_hash, hash)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (ts, actor, action, target, details_json, prev, h),
-            )
+        row = c.execute("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
+        prev = row[0] if row else GENESIS
+        h = _entry_hash(prev, ts, actor, action, target, details_json)
+        c.execute(
+            "INSERT INTO audit_log (ts, actor, action, target, details_json, prev_hash, hash)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts, actor, action, target, details_json, prev, h),
+        )
 
     def list(self, *, limit: int = 200, action_prefix: str | None = None) -> list[AuditEntry]:
         sql = "SELECT * FROM audit_log"

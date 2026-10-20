@@ -28,7 +28,11 @@ class Settings(BaseSettings):
     keyring_service: str = "friday"
 
     # browser
-    driver: Literal["playwright", "patchright", "cdp"] = "playwright"
+    # patchright is the default: real Google Chrome without the navigator.webdriver automation
+    # flag that no ordinary user's browser carries. It is not fingerprint spoofing (see
+    # docs/decisions.md). A profile with its own driver set overrides this; playwright and cdp
+    # stay available by setting FRIDAY_DRIVER or a per-profile driver.
+    driver: Literal["playwright", "patchright", "cdp"] = "patchright"
     # enforce: a sign-in run whose prerequisites fail (friday/preflight.py) doesn't touch the site.
     # warn: log and go ahead. off: skip the checks.
     preflight: Literal["enforce", "warn", "off"] = "enforce"

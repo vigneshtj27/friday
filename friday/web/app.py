@@ -74,20 +74,28 @@ def create_app(ctx: AppContext) -> FastAPI:
     require = Depends(auth.require)
 
     def _startup_doctor() -> None:
-        """Clear stale identity pins at start, and say which (P1-6)."""
+        """Report identity-pin drift at start; never re-pin automatically (P1-6).
+
+        A stale pin (e.g. after the global driver default changed from playwright to patchright)
+        is flagged for the owner, who repairs it deliberately with `profile doctor --repin` or the
+        portal. Re-pinning is forgetting the recorded identity, so it stays owner-controlled; it
+        never touches cookies, sessions or secrets either way.
+        """
         from friday.profiles.doctor import check_all
 
         try:
-            reports = check_all(ctx, repin=True)
+            reports = check_all(ctx, repin=False)
         except Exception:
             log.exception("profile doctor failed at startup")
             return
-        fixed = [r for r in reports if r.needs_repin]
+        stale = [r for r in reports if r.needs_repin]
         broken = [r for r in reports if r.issues and not r.needs_repin]
-        if fixed:
-            ctx.chat.store.add("friday", "At startup I re-pinned the browser identity of "
-                               + ", ".join(f"{r.profile_id} ({'; '.join(r.issues)})" for r in fixed)
-                               + ". The next sign-in records it fresh under the current settings.")  # fmt: skip
+        if stale:
+            ctx.chat.store.add("friday", "At startup I found the pinned browser identity of "
+                               + ", ".join(f"{r.profile_id} ({'; '.join(r.issues)})" for r in stale)
+                               + " no longer matches its settings (the driver default is now patchright). "
+                               "Re-pin it when you're ready: Accounts → Check preflight → Re-pin, "
+                               "or `profile doctor <id> --repin`. Nothing was changed.")  # fmt: skip
         for r in broken:
             log.warning("profile %s identity mismatch: %s", r.profile_id, "; ".join(r.issues))
 

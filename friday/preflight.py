@@ -20,7 +20,10 @@ grants one deliberate attempt. Sites served from localhost (the mock bank) skip 
 
 from __future__ import annotations
 
+import hmac
+import json
 import re
+import secrets
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -243,20 +246,152 @@ class Preflight:
                     sorted({f for i in bad for f in i.get("fix") or []}) + [cli(f"browser-check {profile.id}")])  # fmt: skip
 
     # ---- one deliberate attempt -------------------------------------------------------
+    #
+    # A preflight override is a single-use, 30-minute, profile-scoped exception the owner grants
+    # on purpose (CLI --override, or the portal confirmation). It does NOT skip any check: the
+    # report is still computed and still fails; it only lets exactly one eligible sign-in run go
+    # ahead despite that report. The grant is stored in prefs as JSON; the consume is atomic so two
+    # racing runs can never both use one grant. A legacy grant (a bare ISO string from an older
+    # build) is still honoured.
 
-    def grant_override(self, profile_id: str, *, actor: str = "cli") -> str:
+    @staticmethod
+    def _override_key(profile_id: str) -> str:
+        return f"preflight_override:{profile_id}"
+
+    @staticmethod
+    def _parse_grant(raw: Any) -> dict[str, Any] | None:
+        """Normalise stored grant JSON (new dict form or legacy bare ISO string) to a dict."""
+        if raw is None:
+            return None
+        if isinstance(raw, str):  # legacy: just the expiry
+            return {"id": None, "until": raw, "actor": "owner", "failed": []}
+        if isinstance(raw, dict) and raw.get("until"):
+            return raw
+        return None
+
+    def override_status(self, profile_id: str) -> dict[str, Any] | None:
+        """Read the current grant without consuming it. None when there is none or it expired."""
+        g = self._parse_grant(self.ctx.prefs.get(self._override_key(profile_id)))
+        if g is None:
+            return None
+        try:
+            expired = datetime.fromisoformat(g["until"]) < datetime.now(UTC)
+        except (ValueError, TypeError):
+            return None
+        if expired:
+            return None
+        return {"id": g.get("id"), "until": g["until"], "actor": g.get("actor", "owner"), "failed": g.get("failed") or []}
+
+    def grant_override(self, profile_id: str, *, actor: str = "cli", failed: list[str] | None = None) -> str:
+        """Issue a fresh single-use grant. Server sets the id, expiry (now + OVERRIDE_TTL) and time;
+        the caller supplies only who asked and which checks were failing when shown."""
         until = datetime.now(UTC) + OVERRIDE_TTL
-        self.ctx.prefs.set(f"preflight_override:{profile_id}", iso(until))
-        self.ctx.audit.record("preflight.override_granted", actor=actor, target=profile_id, until=iso(until))
-        return iso(until)
+        grant = {"id": secrets.token_hex(8), "until": iso(until), "actor": actor,
+                 "failed": list(failed or []), "granted_at": iso()}  # fmt: skip
+        self.ctx.prefs.set(self._override_key(profile_id), grant)
+        self.ctx.audit.record("preflight.override_granted", actor=actor, target=profile_id,
+                              grant=grant["id"], until=grant["until"], failed=grant["failed"])  # fmt: skip
+        return grant["until"]
 
-    def take_override(self, profile_id: str) -> bool:
-        key = f"preflight_override:{profile_id}"
-        until = self.ctx.prefs.get(key)
-        if not until:
+    def take_override(self, profile_id: str, *, run_id: str | None = None) -> bool:
+        """Consume one grant for a run, atomically. Returns True only if a live grant existed and
+        this caller is the one that removed it; the delete + audit commit together, so concurrent
+        callers across connections yield exactly one winner. Fails closed on malformed/expired."""
+        key = self._override_key(profile_id)
+        db = self.ctx.db
+        with db.tx() as c:
+            row = c.execute("SELECT value_json FROM prefs WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                return False
+            # Delete first and require we removed the row: a racing consumer's DELETE then finds
+            # nothing. One-use is enforced here, not by any in-memory flag.
+            if c.execute("DELETE FROM prefs WHERE key = ?", (key,)).rowcount != 1:
+                return False
+            try:
+                g = self._parse_grant(json.loads(row[0]))
+                live = g is not None and datetime.fromisoformat(g["until"]) >= datetime.now(UTC)
+            except (ValueError, TypeError):
+                g, live = None, False
+            if not live:
+                return False  # expired/malformed grant is now cleared; fail closed
+            self.ctx.audit.record_c(c, "preflight.override_used", actor="owner", target=profile_id,
+                                    grant=(g or {}).get("id"), run=run_id, failed=(g or {}).get("failed") or [])  # fmt: skip
+            return True
+
+    # ---- portal flow: a fresh check, then a deliberate owner grant ----------------------
+
+    @staticmethod
+    def _confirm_key(profile_id: str) -> str:
+        return f"preflight_confirm:{profile_id}"
+
+    def _signature(self, profile_id: str, rep: Report) -> str:
+        """What the owner is confirming: the profile's driver/proxy and the exact set of failed
+        checks. If any of this changes before they confirm, the old confirmation is stale."""
+        p = self.ctx.profiles.get(profile_id)
+        return "|".join([
+            self.ctx.profiles.effective_driver(p.config),
+            p.config.proxy.server if p.config.proxy else "none",
+            ",".join(sorted(i.name for i in rep.failed)),
+        ])  # fmt: skip
+
+    def _sanitized_egress(self, profile_id: str) -> dict[str, Any] | None:
+        eg = self.ctx.prefs.get(f"egress:{profile_id}") or {}
+        if not eg:
+            return None
+        # server-only safe fields; the proxy server string carries no credentials by model design
+        return {k: eg.get(k) for k in ("ip", "org", "asn", "country", "datacenter", "checked_at", "proxy") if k in eg}
+
+    async def portal_check(self, profile_id: str, *, fresh: bool = True) -> dict[str, Any]:
+        """Run a fresh preflight (no site opened, no login) for the Accounts view, and mint a
+        single-use confirmation token bound to the current report. Reading this never grants."""
+        p = self.ctx.profiles.get(profile_id)  # raises ProfileNotFound -> 404 at the endpoint
+        need_google = False
+        rep = await self.check(profile_id, need_google=need_google, fresh=fresh)
+        token = secrets.token_hex(16)
+        sig = self._signature(profile_id, rep)
+        self.ctx.prefs.set(self._confirm_key(profile_id),
+                           {"token": token, "sig": sig, "issued_at": iso()})  # fmt: skip
+        return {
+            "profile_id": profile_id,
+            "effective_driver": self.ctx.profiles.effective_driver(p.config),
+            "report": rep.public(),
+            "egress": self._sanitized_egress(profile_id),
+            "override": self.override_status(profile_id),
+            "pending_signin": self.ctx.jobs.has_pending_signin(profile_id) if self.ctx.jobs else None,
+            "confirm_token": token,  # never logged; returned only to this authenticated response
+        }
+
+    async def portal_grant(self, profile_id: str, *, confirm_token: str, confirm_profile_id: str) -> dict[str, Any]:
+        """Validate the owner's confirmation and, only if the checks still fail and nothing material
+        changed, issue one grant. Returns a dict describing the outcome; the endpoint maps the
+        'status' to an HTTP code. Never grants merely because the page was opened."""
+        p = self.ctx.profiles.get(profile_id)  # ProfileNotFound -> 404
+        if confirm_profile_id != profile_id:
+            return {"status": "mismatch"}  # 400: typed id / dialog came from another profile
+        stored = self.ctx.prefs.get(self._confirm_key(profile_id))
+        if not stored or not confirm_token or not hmac.compare_digest(str(stored.get("token", "")), confirm_token):
+            return {"status": "stale", "reason": "confirmation expired or not recognised; re-check and try again"}
+        # Refuse while a sign-in is queued/running: that job could consume the grant unexpectedly.
+        pending = self.ctx.jobs.has_pending_signin(profile_id) if self.ctx.jobs else None
+        if pending:
+            return {"status": "busy", "run_id": pending}
+        rep = await self.check(profile_id, fresh=True)
+        if rep.ok:
+            self.ctx.prefs.set(self._confirm_key(profile_id), None)
+            return {"status": "all_clear"}  # nothing to override; no grant created
+        if self._signature(profile_id, rep) != stored.get("sig"):
+            # the report or the profile's driver/proxy changed since it was shown: force a re-decision
+            return {"status": "changed", "report": rep.public(),
+                    "effective_driver": self.ctx.profiles.effective_driver(p.config)}  # fmt: skip
+        self.ctx.prefs.set(self._confirm_key(profile_id), None)  # one-use confirmation
+        until = self.grant_override(profile_id, actor="owner", failed=[i.name for i in rep.failed])
+        return {"status": "granted", "override": self.override_status(profile_id), "until": until}
+
+    def clear_override(self, profile_id: str, *, actor: str = "owner") -> bool:
+        """Cancel an un-consumed grant (owner changed their mind)."""
+        key = self._override_key(profile_id)
+        if self.ctx.prefs.get(key) is None:
             return False
-        self.ctx.prefs.set(key, None)  # one attempt
-        if datetime.fromisoformat(until) < datetime.now(UTC):
-            return False
-        self.ctx.audit.record("preflight.override_used", actor="owner", target=profile_id)
+        self.ctx.prefs.set(key, None)
+        self.ctx.audit.record("preflight.override_cancelled", actor=actor, target=profile_id)
         return True

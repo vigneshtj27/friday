@@ -192,3 +192,34 @@ def test_timezone_aliases_match():
     assert same_timezone("Asia/Calcutta", "Asia/Kolkata")
     assert same_timezone("Europe/Kiev", "Europe/Kyiv")
     assert not same_timezone("Asia/Kolkata", "Europe/Berlin")
+
+
+def test_default_driver_is_patchright_and_explicit_choices_win(ctx):
+    """Null driver inherits the global default (patchright); explicit per-profile and global
+    choices are preserved; no second competing default."""
+    assert ctx.settings.driver == "patchright"
+    p = ctx.profiles.create("mybank", "me")  # no driver supplied
+    assert p.config.driver is None and ctx.profiles.effective_driver(p.config) == "patchright"
+    # explicit per-profile driver overrides the default
+    ctx.profiles.update_config(p.id, p.config.model_copy(update={"driver": "playwright"}))
+    assert ctx.profiles.effective_driver(ctx.profiles.get(p.id).config) == "playwright"
+    # a global setting of playwright makes null profiles inherit playwright
+    ctx.settings.driver = "playwright"
+    q = ctx.profiles.create("mybank", "spouse")
+    assert q.config.driver is None and ctx.profiles.effective_driver(q.config) == "playwright"
+
+
+async def test_open_uses_patchright_for_a_null_driver_profile(ctx, monkeypatch):
+    p = ctx.profiles.create("mybank", "me")  # null driver
+    import friday.profiles.manager as m
+
+    seen: list[str] = []
+
+    def spy(name):
+        seen.append(name)
+        return FakeDriver(FP)
+
+    monkeypatch.setattr(m, "get_driver", spy)
+    async with ctx.profiles.open(p.id, purpose="test"):
+        pass
+    assert seen == ["patchright"]

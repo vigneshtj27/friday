@@ -19,7 +19,7 @@ async function api(path, opts = {}) {
   const r = await fetch(path, { credentials: "same-origin", headers: { "Content-Type": "application/json" }, ...opts });
   if (r.status === 401) { location.href = "/login?next=/portal"; throw new Error("login"); }
   const body = r.headers.get("content-type")?.includes("json") ? await r.json() : await r.text();
-  if (!r.ok) throw new Error(body?.detail || body || r.status);
+  if (!r.ok) throw new Error((body?.detail && (body.detail.message || typeof body.detail === "string" && body.detail)) || body || r.status);
   return body;
 }
 const post = (path, data) => api(path, { method: "POST", body: JSON.stringify(data || {}) });
@@ -47,11 +47,12 @@ const views = {
     const rows = state.profiles.map((p) => `
       <tr><td><b>${esc(p.id)}</b><div class="muted">${esc(p.locale)} · ${esc(p.timezone || "host tz")}${p.proxy ? " · proxy " + esc(p.proxy) : ""}</div>
       <div class="muted">secrets: ${p.secrets.map(esc).join(", ") || "none"}</div></td>
-      <td><span class="chip ${statusClass(p.status)}">${esc(p.status)}</span>${p.running ? ' <span class="chip warn">running</span>' : ""}</td>
+      <td><span class="chip ${statusClass(p.status)}">${esc(p.status)}</span>${p.running ? ' <span class="chip warn">running</span>' : ""}${p.override ? ' <span class="chip warn" title="one-use preflight override active">override armed</span>' : ""}</td>
       <td>${p.last_run ? `<a href="#runs/${p.last_run.id}">${esc(p.last_run.kind)}</a> <span class="${statusClass(p.last_run.status)}">${esc(p.last_run.status)}</span><div class="muted">${ago(p.last_run.created_at)}</div>` : '<span class="muted">never</span>'}</td>
       <td class="row">
         <button data-act="login" data-id="${esc(p.id)}">Log in</button>
         <button data-act="statement" data-id="${esc(p.id)}" class="primary">Fetch statement</button>
+        <button data-act="preflight" data-id="${esc(p.id)}">Check preflight</button>
         <button data-act="seed" data-id="${esc(p.id)}">Manual login</button>
         <button data-act="wipe" data-id="${esc(p.id)}" class="danger">Revoke everything</button>
       </td></tr>`).join("");
@@ -68,6 +69,7 @@ const views = {
         const r = await post(`/api/profiles/${id}/runs`, { kind: "fetch_statement", params: { start: document.getElementById("st-from").value, end: document.getElementById("st-to").value } });
         location.hash = `runs/${r.run_id}`;
       }
+      if (b.dataset.act === "preflight") { location.hash = `preflight/${id}`; return; }
       if (b.dataset.act === "seed") { const r = await post(`/api/profiles/${id}/seed`); window.open(r.url, "_blank"); }
       if (b.dataset.act === "wipe" && prompt(`Type ${id} to wipe its Chrome profile and all its secrets. This cannot be undone.`) === id) {
         await api(`/api/profiles/${id}`, { method: "DELETE" });
@@ -181,7 +183,8 @@ async function runDetail(id) {
   $view.innerHTML = card(`${esc(r.kind)} · ${esc(r.profile_id)} <span class="${statusClass(r.status)}">${esc(r.status)}</span>`,
     `<p>${esc(r.summary || "")}</p><div class="muted">${r.steps} steps · $${(r.cost_usd || 0).toFixed(4)} · started ${ago(r.started_at)}</div>
      ${r.result ? `<details><summary>Result</summary><pre>${esc(JSON.stringify(r.result, null, 2))}</pre></details>` : ""}
-     ${r.result?.diagnosis_report ? `<p><a href="#diagnosis/${r.result.diagnosis_report}">Open diagnosis report</a></p>` : ""}`,
+     ${r.result?.diagnosis_report ? `<p><a href="#diagnosis/${r.result.diagnosis_report}">Open diagnosis report</a></p>` : ""}
+     ${r.result?.preflight || r.result?.browser_check ? `<p>Preflight blocked this sign-in. Fix the failing checks, or (as a deliberate exception) allow one attempt, from <a href="#preflight/${esc(r.profile_id)}">this account's preflight view</a>. The CLI <span class="mono">preflight --override</span> is an optional fallback.</p>` : ""}`,
     data.active ? `<button class="danger" id="cancel">Stop run</button>` : "") + card("Step log", steps || empty("No steps yet."));
   const c = document.getElementById("cancel");
   if (c) c.onclick = () => act(() => post(`/api/runs/${id}/cancel`));
@@ -212,9 +215,88 @@ async function diagDetail(id) {
   document.getElementById("d-probes").onclick = () => act(async () => { const x = await post(`/api/diagnosis/${id}/probes`); location.hash = `runs/${x.run_id}`; });
 }
 
+function checkRow(i) {
+  const fixes = (i.fix || []).map((f) => `<div class="muted mono">fix: ${esc(f)}</div>`).join("");
+  return `<tr><td>${i.ok ? '<span class="ok">ok</span>' : '<span class="bad">FAIL</span>'}</td>
+    <td><b>${esc(i.name)}</b></td><td>${esc(i.detail)}${fixes}</td></tr>`;
+}
+
+// Re-running a check or opening this page never opens the bank and never grants. A grant is created
+// only when the owner types the exact profile id and confirms. The confirm_token (not logged) ties
+// the confirmation to the exact report shown, so a changed report is rejected as stale.
+async function preflightView(id) {
+  let data;
+  try { data = await post(`/api/profiles/${encodeURIComponent(id)}/preflight`); }
+  catch (e) { $view.innerHTML = card("Preflight", `<p>${esc(id)}</p><pre>${esc(e.message)}</pre><p><a href="#accounts">Back to Accounts</a></p>`); return; }
+  const rep = data.report, token = data.confirm_token, eg = data.egress || {};
+  const checkedAt = rep.checked_at ? rep.checked_at.slice(0, 16).replace("T", " ") + " UTC" : "just now";
+  const egLine = eg.ip ? `${esc(eg.ip)} ${esc(eg.org || "")} (${esc(eg.country || "?")}${eg.asn ? ", AS" + esc(eg.asn) : ""})${eg.datacenter ? ' <span class="bad">datacenter</span>' : ""} via ${esc(eg.proxy || "no proxy")}` : "not looked up";
+  const failed = rep.items.filter((i) => !i.ok);
+  const ov = data.override;
+  const rows = rep.items.map(checkRow).join("");
+  const head = `<p><b>${esc(id)}</b> · effective driver <span class="chip">${esc(data.effective_driver)}</span> · checked ${esc(checkedAt)}</p>
+    <p class="muted">Egress: ${egLine}</p>
+    <p>${rep.ok ? '<span class="ok">All checks pass.</span>' : `<span class="bad">${failed.length} check${failed.length > 1 ? "s" : ""} failing.</span>`}
+       Re-checking never opens the bank or signs in.</p>
+    <table><tr><th></th><th>Check</th><th>Detail</th></tr>${rows}</table>
+    <div class="row"><button id="pf-recheck">Re-check</button>${failed.some((i) => i.name === "identity") ? '<button id="pf-repin">Re-pin identity</button>' : ""}<a href="#accounts">Back to Accounts</a></div>`;
+
+  let actionCard = "";
+  if (rep.ok) {
+    actionCard = card("Override", `<p class="ok">No override needed: every check passes. Start the run from Accounts when you're ready.</p>`);
+  } else if (ov) {
+    actionCard = card("Override armed", `<p class="warn">A one-use override is armed for <b>${esc(id)}</b>, expiring <span data-countdown="${Date.parse(ov.until)}"></span> (${esc(ov.until.slice(0, 16).replace("T", " "))} UTC).</p>
+      <p class="muted">The next eligible sign-in run for this profile will consume it. It does not start a run by itself, and it does not bypass the browser leak check, rate limits, approvals, OTP, or a CAPTCHA/403 stop. A failed sign-in still counts and can start backoff.</p>
+      <div class="row"><button id="pf-cancel" class="danger">Cancel override</button></div>`);
+  } else if (data.pending_signin) {
+    actionCard = card("Override", `<p class="warn">A sign-in run (<a href="#runs/${esc(data.pending_signin)}">${esc(data.pending_signin)}</a>) is already queued or running for this profile. Wait for it to finish, then re-check — an override can't be granted now so a queued job can't pick it up unexpectedly.</p>`);
+  } else {
+    actionCard = card("Allow one attempt (deliberate exception)",
+      `<p>This does <b>not</b> fix the failing checks. It lets exactly one sign-in run for <b>${esc(id)}</b> go ahead despite them, once, in the next 30 minutes.</p>
+       <ul>
+         <li>Still failing: ${failed.map((i) => `<span class="chip bad">${esc(i.name)}</span>`).join(" ")}</li>
+         <li>A failed sign-in still counts and can trigger backoff or account restrictions.</li>
+         <li>Permission is not a guarantee: the in-browser leak check, login safety stops and other controls can still block the run.</li>
+         <li>One use, 30 minutes, this profile only. It does not start a run — you do that from Accounts afterwards.</li>
+       </ul>
+       <p>Type the account id <span class="mono">${esc(id)}</span> to confirm:</p>
+       <div class="row"><input id="pf-confirm" placeholder="${esc(id)}" autocomplete="off" spellcheck="false" style="font-family:var(--mono,monospace)">
+         <button id="pf-grant" class="danger" disabled>Allow one attempt for 30 minutes</button>
+         <a href="#accounts">Cancel</a></div>
+       <div id="pf-msg" class="muted"></div>`);
+  }
+  $view.innerHTML = card("Preflight", head) + actionCard;
+
+  document.getElementById("pf-recheck").onclick = () => preflightView(id);
+  const repin = document.getElementById("pf-repin");
+  if (repin) repin.onclick = () => act2(async () => { await post(`/api/profiles/${encodeURIComponent(id)}/repin`); await preflightView(id); });
+  const cancel = document.getElementById("pf-cancel");
+  if (cancel) cancel.onclick = () => act2(async () => { await post(`/api/profiles/${encodeURIComponent(id)}/preflight/cancel`); await refreshState(); await preflightView(id); });
+  const input = document.getElementById("pf-confirm"), grant = document.getElementById("pf-grant");
+  if (input && grant) {
+    input.oninput = () => { grant.disabled = input.value !== id; };
+    grant.onclick = async () => {
+      grant.disabled = true;
+      const msg = document.getElementById("pf-msg");
+      try {
+        const r = await post(`/api/profiles/${encodeURIComponent(id)}/preflight/grant`, { confirm_token: token, confirm_profile_id: input.value });
+        if (r.status === "all_clear") { msg.innerHTML = '<span class="ok">All checks pass now; no override was created.</span>'; }
+        await refreshState(); await preflightView(id);
+      } catch (e) {
+        msg.innerHTML = `<span class="bad">${esc(e.message)}</span> — re-checking.`;
+        setTimeout(() => preflightView(id), 1200);
+      }
+    };
+  }
+}
+
+// like act() but does not re-run route() (keeps us on the preflight view)
+async function act2(fn) { try { await fn(); } catch (e) { alert(e.message); } }
+
 async function route() {
   const [name, id] = location.hash.slice(1).split("/");
   renderNav();
+  if (name === "preflight" && id) { if (!state) await refreshState(); return preflightView(id); }
   if (!state) await refreshState();
   try { await (views[name || "accounts"] || views.accounts)(id); } catch (e) { $view.innerHTML = card("Error", `<pre>${esc(e.message)}</pre>`); }
 }

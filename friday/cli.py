@@ -212,7 +212,7 @@ def preflight_cmd(
         if rep.ok:
             typer.echo("All clear; no override needed.")
         else:
-            until = ctx.preflight.grant_override(profile_id)
+            until = ctx.preflight.grant_override(profile_id, actor="cli", failed=[i.name for i in rep.failed])
             typer.secho(f"Override granted: the next sign-in on {profile_id} (until {until[:16]}Z) runs despite the failures above. "
                         "A bounce still counts and starts the backoff.", fg="yellow")  # fmt: skip
     if not rep.ok and not override:
