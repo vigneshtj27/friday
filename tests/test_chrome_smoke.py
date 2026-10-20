@@ -72,7 +72,7 @@ async def test_real_chrome_persistent_profile(ctx, local_site, driver):
 
 
 @pytest.mark.parametrize("driver,expect_webdriver", [("playwright", True), ("patchright", False)])
-async def test_driver_webdriver_flag_and_locale(driver, expect_webdriver):
+async def test_driver_webdriver_flag_and_locale(driver, expect_webdriver, local_site):
     """patchright removes navigator.webdriver; locale is set consistently from the profile."""
     import tempfile
     from pathlib import Path
@@ -81,12 +81,16 @@ async def test_driver_webdriver_flag_and_locale(driver, expect_webdriver):
     from friday.drivers import get_driver, LaunchRequest
 
     d = Path(tempfile.mkdtemp())
+    from friday.config import Settings
+
+    s = Settings(_env_file=None)  # honours FRIDAY_CHROME_EXECUTABLE / FRIDAY_CHROME_SANDBOX like the other tests
     req = LaunchRequest(user_data_dir=d / "c", downloads_dir=d / "dl", locale="en-IN",
-                        timezone="Asia/Kolkata", window_width=1280, window_height=800)
+                        timezone="Asia/Kolkata", window_width=1280, window_height=800,
+                        executable=s.chrome_executable, sandbox=s.chrome_sandbox)
     session = await get_driver(driver).launch(req)
     try:
         page = await session.page()
-        await page.goto("https://example.com", wait_until="domcontentloaded", timeout=45000)
+        await page.goto(local_site, wait_until="domcontentloaded", timeout=45000)  # local: no network needed
         wd = await isolated.evaluate(page.main_frame, "() => navigator.webdriver")
         lang = await isolated.evaluate(page.main_frame, "() => navigator.language")
         assert bool(wd) is expect_webdriver, f"{driver} webdriver={wd}"

@@ -62,6 +62,7 @@ def register_api(app: FastAPI, ctx: AppContext, require: Any) -> None:
             ],
             "active_runs": list(active),
             "gmail_connected": ctx.gmail.configured,
+            "sheets_connected": ctx.sheets.configured,
             "notify": [n.name for n in ctx.notifier.notifiers],
             "model": ctx.settings.model,
         }

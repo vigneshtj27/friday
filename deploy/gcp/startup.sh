@@ -55,6 +55,11 @@ umask 077
   echo "FRIDAY_MASTER_KEY=$(secret rv-fri-master-key)"
   echo "FRIDAY_ADMIN_PASSWORD_HASH='$(secret rv-fri-admin-password-hash)'"
   echo "ANTHROPIC_API_KEY=$(secret rv-fri-anthropic-api-key)"
+  # Optional: Google OAuth client for Gmail codes and Sheets (deploy/gcp/deploy.sh google-client).
+  if gid=$(secret rv-fri-google-client-id 2>/dev/null); then
+    echo "FRIDAY_GOOGLE_CLIENT_ID=$gid"
+    echo "FRIDAY_GOOGLE_CLIENT_SECRET=$(secret rv-fri-google-client-secret)"
+  fi
   echo "FRIDAY_HOST_DATA=/mnt/friday-data/data"
   echo "FRIDAY_DEFAULT_TIMEZONE=$(attr friday-timezone)"
   echo "FRIDAY_DEFAULT_LOCALE=$(attr friday-locale)"

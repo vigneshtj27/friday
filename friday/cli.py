@@ -190,6 +190,35 @@ def profile_set_driver(profile_id: str, driver: str):
     typer.echo(f"{profile_id}: driver {driver}")
 
 
+@profile_app.command("set-identity")
+def profile_set_identity(
+    profile_id: str,
+    locale: Annotated[str, typer.Option(help="e.g. en-IN; match the egress IP's country")],
+    timezone: Annotated[str, typer.Option(help="IANA zone, e.g. Asia/Kolkata")],
+):
+    """Set a profile's locale and timezone (they must agree with its egress IP)."""
+    from zoneinfo import ZoneInfo
+
+    ZoneInfo(timezone)  # raises on a typo
+    ctx = _ctx()
+    profile = ctx.profiles.get(profile_id)
+    ctx.profiles.update_config(profile_id, profile.config.model_copy(update={"locale": locale, "timezone": timezone}), actor="cli")
+    ctx.db.execute("UPDATE profiles SET fingerprint_json = NULL WHERE id = ?", (profile_id,))
+    typer.echo(f"{profile_id}: locale {locale}, timezone {timezone}")
+
+
+@site_app.command("set-otp-senders")
+def site_set_otp_senders(site_id: str, sender: Annotated[list[str], typer.Argument(help="addresses or @domains")]):
+    """Replace a site's OTP email senders (used to find codes in Gmail)."""
+    ctx = _ctx()
+    site = ctx.sites.get(site_id)
+    if site is None:
+        typer.secho(f"no site {site_id}", fg="red", err=True)
+        raise typer.Exit(2)
+    ctx.sites.upsert(site.model_copy(update={"otp_senders": sender}), actor="cli")
+    typer.echo(f"{site_id}: OTP senders {', '.join(sender)}")
+
+
 @profile_app.command("wipe")
 def profile_wipe(profile_id: str, yes: Annotated[bool, typer.Option("--yes")] = False):
     """Revoke everything for a profile: Chrome data, downloads, and its secrets."""

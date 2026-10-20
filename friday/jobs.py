@@ -13,17 +13,20 @@ from typing import Any
 from friday.agent.policy import ActionPolicy, PolicyContext
 from friday.agent.recorder import PageRecorder
 from friday.agent.tools import ExecutorDeps, Services, ToolExecutor
+from friday.capabilities.activity import FetchActivity
 from friday.capabilities.statement import FetchStatement
 from friday.capabilities.task import OwnerTask
 from friday.login.classifier import LoginState
 from friday.login.engine import LoginEngine, LoginServices
 from friday.runs import RunStatus
 from friday.util import iso, utcnow
+from friday.sheets import validate_then
 from friday.vault.injector import InjectionScope
 
 log = logging.getLogger(__name__)
 
-KINDS = {"login", "fetch_statement", "task", "diagnose_probes", "diagnose_manual"}
+KINDS = {"login", "fetch_statement", "fetch_activity", "task", "diagnose_probes", "diagnose_manual"}
+FETCH_KINDS = ("fetch_statement", "fetch_activity")
 FAILURE_STATES = {
     LoginState.SILENT_BOUNCE, LoginState.ACCESS_DENIED_OR_BLOCKED, LoginState.CREDENTIALS_REJECTED,
     LoginState.CAPTCHA, LoginState.PAGE_FAILED,
@@ -78,13 +81,20 @@ class JobRunner:
             raise ValueError(f"unknown job kind {kind!r}")
         params = dict(params or {})
         profile = self.ctx.profiles.get(profile_id)
+        then = params.pop("then", None)
         if kind == "fetch_statement":
             params = FetchStatement.validate(params)
         if kind == "task":
             params = OwnerTask.validate(params)
+        if kind == "fetch_activity":
+            params = FetchActivity.validate(params)
+        if then is not None:
+            if kind not in FETCH_KINDS:
+                raise ValueError("only statement and activity fetches can be followed by a sheet update")
+            params["then"] = validate_then(then)
         if kind in ("diagnose_probes", "diagnose_manual") and not params.get("report_id"):
             raise ValueError("report_id is required")
-        if kind in ("login", "fetch_statement", "task") and not force:
+        if kind in ("login", *FETCH_KINDS, "task") and not force:
             self._check_backoff(profile.site_id)
         run_id = self.ctx.runs.create(kind, profile_id, params)
         self.ctx.audit.record("job.submit", actor="admin", target=profile_id, run=run_id, kind=kind)
@@ -247,9 +257,11 @@ class JobRunner:
             ctx.profiles.set_status(profile.id, "logged_in")
             if kind == "login":
                 ctx.runs.finish(run_id, RunStatus.SUCCEEDED, login.summary, {"reused_session": login.reused_session})
-            elif kind in ("fetch_statement", "task"):
-                cap = FetchStatement(ctx, llm) if kind == "fetch_statement" else OwnerTask(ctx, llm)
+            elif kind in (*FETCH_KINDS, "task"):
+                cap = {"fetch_statement": FetchStatement, "fetch_activity": FetchActivity, "task": OwnerTask}[kind](ctx, llm)
                 res = await cap.run(op, ex, run_id, params)
+                if res.status == "succeeded" and (params.get("then") or {}).get("sheet"):
+                    await self._then_sheet(res, profile.id, params)
                 self._save_notes(op.site.id, run_id, res.notes, res.contradicted_notes)
                 ctx.runs.finish(run_id, RunStatus(res.status), res.summary, res.result)
                 await ctx.notifier.send(
@@ -258,6 +270,36 @@ class JobRunner:
                 )  # fmt: skip
             await ex.stop()
         return report_id
+
+    async def _then_sheet(self, res: Any, profile_id: str, params: dict[str, Any]) -> None:
+        """After a successful fetch: append the range's transactions to the owner's tab and verify by reading it back."""
+        from datetime import date as _date
+
+        from friday.sheets import export_transactions
+
+        t = params["then"]["sheet"]
+        start, end = _date.fromisoformat(params["start"]), _date.fromisoformat(params["end"])
+        try:
+            v = await export_transactions(
+                self.ctx, spreadsheet=t["spreadsheet"], tab=t["tab"], account=profile_id, start=start, end=end,
+                include_credits=t.get("include_credits", False), column_map=t.get("column_map"),
+            )  # fmt: skip
+        except Exception as e:
+            res.status = "needs_attention"
+            res.result["sheet_error"] = f"{type(e).__name__}: {e}"[:500]
+            res.summary += f" The sheet was not updated: {e}"[:400]
+            return
+        res.result["sheet"] = v
+        res.summary += (
+            f" Sheet tab '{v['tab']}': appended {v['appended']} row(s)"
+            + (f", skipped {v['already_in_sheet']} already there" if v["already_in_sheet"] else "")
+            + (f", left out {v['credits_left_out']} credit(s)" if v["credits_left_out"] else "")
+            + f". Read back: {v['rows_after']} data rows (was {v['rows_before']}); {v['rows_in_range']} rows dated "
+            f"{start}..{end} totalling {v['total_in_range']}."
+        )
+        if not v["ok"]:
+            res.status = "needs_attention"
+            res.summary += f" Only {v['found_after']} of {v['appended']} appended rows were found on read-back: check the tab."
 
     def _save_notes(self, site_id: str, run_id: str, notes: list[dict[str, str]], contradicted: list[str]) -> None:
         for n in notes[:10]:

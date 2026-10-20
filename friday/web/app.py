@@ -309,6 +309,10 @@ rfb.addEventListener('disconnect', () => document.getElementById('screen').textC
 
     register_chat(app, ctx, require, auth)
 
+    from friday.web.google_api import register_google
+
+    register_google(app, ctx, auth)
+
     @app.exception_handler(ProfileBusy)
     async def busy_handler(_: Request, exc: ProfileBusy):
         return JSONResponse({"detail": str(exc)}, status_code=409)

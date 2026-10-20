@@ -147,8 +147,9 @@ def _map_header(row: list[str]) -> dict[str, int] | None:
 
 
 def rows_to_transactions(
-    rows: list[list[str]], *, source: str, raw_ref: str, currency: str, dayfirst: bool = True
+    rows: list[list[str]], *, source: str, raw_ref: str, currency: str, dayfirst: bool = True, card: bool = False
 ) -> list[Transaction]:
+    """`card`: a card account's view, where a plain amount is a charge and a minus sign is a refund or payment."""
     header_idx, cols = None, None
     for i, row in enumerate(rows[:40]):
         cols = _map_header(row)
@@ -176,7 +177,12 @@ def rows_to_transactions(
             if a:
                 amount = abs(a[0])
                 t = get("type").lower()
-                direction = a[1] or ("debit" if t.startswith(("d", "w")) else "credit" if t.startswith(("c", "dep")) else "credit")
+                raw = get("amount")
+                if card:
+                    signed = raw.lstrip().startswith(("-", "(", "\u2212")) or raw.rstrip().endswith("-")
+                    direction = "credit" if signed or a[1] == "credit" or t.startswith(("c", "pay", "ref")) else "debit"
+                else:
+                    direction = a[1] or ("debit" if t.startswith(("d", "w")) else "credit" if t.startswith(("c", "dep")) else "credit")
         if amount is None:
             continue
         bal = parse_amount(get("balance")) if "balance" in cols else None

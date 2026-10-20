@@ -186,6 +186,13 @@ MIGRATIONS: list[str] = [
         completed_at TEXT
     );
     """,
+    """
+    CREATE TABLE prefs (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 

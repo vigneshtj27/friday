@@ -88,7 +88,8 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
             if r is None:
                 return None
             return {"status": r["status"], "kind": r["kind"], "summary": r["summary"], "goal": (r["params"] or {}).get("goal"),
-                    "start": (r["params"] or {}).get("start"), "end": (r["params"] or {}).get("end"), "link": f"/portal#runs/{ref}"}  # fmt: skip
+                    "start": (r["params"] or {}).get("start"), "end": (r["params"] or {}).get("end"),
+                    "sheet_tab": (((r["params"] or {}).get("then") or {}).get("sheet") or {}).get("tab"), "link": f"/portal#runs/{ref}"}  # fmt: skip
         return None
 
     def cards_for(messages: list[dict[str, Any]]) -> dict[str, Any]:

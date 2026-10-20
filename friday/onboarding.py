@@ -55,7 +55,7 @@ FIELDS: dict[str, dict[str, Any]] = {
 }  # fmt: skip
 DEFAULT_FIELDS = ["username", "password", "totp_seed"]
 OPTIONAL_FIELDS = {"totp_seed"}
-RESUME_KINDS = {"fetch_statement", "task", "login"}
+RESUME_KINDS = {"fetch_statement", "task", "login", "fetch_activity"}
 
 
 class SetupError(ValueError):
@@ -276,10 +276,18 @@ class Onboarding:
         if resume is not None:
             if resume.get("kind") not in RESUME_KINDS:
                 raise SetupError(f"unknown follow-up job {resume.get('kind')!r}")
-            if resume["kind"] == "fetch_statement":
+            if resume["kind"] in ("fetch_statement", "fetch_activity"):
+                from friday.capabilities.activity import FetchActivity
                 from friday.capabilities.statement import FetchStatement
+                from friday.sheets import validate_then
 
-                resume = {"kind": "fetch_statement", "params": FetchStatement.validate(resume.get("params") or {})}
+                raw = dict(resume.get("params") or {})
+                then = raw.pop("then", None)
+                cap = FetchStatement if resume["kind"] == "fetch_statement" else FetchActivity
+                params = cap.validate(raw)
+                if then:
+                    params["then"] = validate_then(then)
+                resume = {"kind": resume["kind"], "params": params}
             elif resume["kind"] == "task":
                 from friday.capabilities.task import OwnerTask
 
@@ -364,7 +372,8 @@ class Onboarding:
         ctx.audit.record("setup.done", actor="admin", target=profile.id, setup=setup_id, saved=list(saved))
         resume = r["resume"] or {"kind": "login", "params": {}}
         run_id = ctx.jobs.submit(resume["kind"], profile.id, resume.get("params") or {}, force=True)
-        label = {"fetch_statement": "fetching the statement", "task": "working on your request", "login": "signing in to check them"}[resume["kind"]]
+        label = {"fetch_statement": "fetching the statement", "fetch_activity": "reading the recent activity",
+                 "task": "working on your request", "login": "signing in to check them"}.get(resume["kind"], "starting the job")
         await ctx.chat.send(
             f"Saved {', '.join(saved)} for {profile.id} in the encrypted vault. Now {label}.",
             None,

@@ -147,3 +147,62 @@ async def test_run_finish_does_not_duplicate_its_card(setup):
     await ctx.chat.send("mybank.me: Balance is ₹40,210.55.", None, meta=meta)
     rows = ctx.chat.store.list()
     assert [r["kind"] for r in rows] == ["run", None]
+
+
+# ---- "fetch and populate my Oct Amex expenses" -------------------------------------------------
+
+
+@pytest.fixture
+def sheets(setup):
+    import httpx
+
+    from friday.sheets import SheetsClient
+
+    from .test_sheets import SID, FakeAuth, FakeGoogle
+
+    ctx, submitted, attach = setup
+    fake = FakeGoogle({"Oct 2026": [["Date", "Description", "Category", "Amount", "Notes"]]})
+    ctx.sheets = SheetsClient(FakeAuth(), transport=httpx.MockTransport(fake.handler))
+    return ctx, submitted, attach, SID
+
+
+async def test_populate_saves_sheet_then_starts_activity_fetch_with_sheet_step(sheets):
+    ctx, submitted, attach, sid = sheets
+    today = date.today().isoformat()
+    first = date.today().replace(day=1).isoformat()
+    llm = attach([
+        ("start_run", {"account": "mybank.me", "kind": "fetch_activity", "start": first, "end": today,
+                       "account_type": "card", "to_sheet": True}),
+        ("set_expense_sheet", {"spreadsheet": sid, "tab": "Oct 2026"}),
+        ("start_run", {"account": "mybank.me", "kind": "fetch_statement", "start": first, "end": today,
+                       "account_type": "card", "to_sheet": True}),
+        "Reading this month's activity, then adding it to 'Oct 2026'.",
+    ])
+    await ctx.chat.owner_says("fetch and populate my Oct card expenses into the sheet")
+    await settle(ctx)
+
+    # 1st try: no sheet saved yet -> the error tells the model to ask / save one.
+    err = llm.calls[1][-1]["content"][0]
+    assert err["is_error"] and "set_expense_sheet" in err["content"]
+    # set_expense_sheet checked the columns before saving.
+    saved = __import__("json").loads(llm.calls[2][-1]["content"][0]["content"])
+    assert saved["columns"] == {"Date": "date", "Description": "description", "Category": "skip", "Amount": "amount", "Notes": "skip"}
+    # A card "statement" for recent days became an activity fetch carrying the sheet step.
+    kind, account, params = submitted[0]
+    assert kind == "fetch_activity" and account == "mybank.me"
+    assert params["account_type"] == "card" and params["then"]["sheet"]["tab"] == "Oct 2026"
+    note = __import__("json").loads(llm.calls[3][-1]["content"][0]["content"])["note"]
+    assert "Switched to fetch_activity" in note
+    card = [r for r in ctx.chat.store.list() if r["kind"] == "run"][-1]
+    assert "then adding it to 'Oct 2026'" in card["text"]
+
+
+async def test_sheets_not_connected_points_to_connect_google(setup):
+    ctx, _, attach = setup
+    ctx.settings.google_client_id = "cid"
+    ctx.google.client_id = "cid"
+    llm = attach([("sheets_list", {}), ("connect_google", {"purpose": "sheets"}), "Tap the link to connect Google Sheets."])
+    await ctx.chat.owner_says("which sheets do I have?")
+    await settle(ctx)
+    assert "connect_google" in llm.calls[1][-1]["content"][0]["content"]
+    assert any("/oauth/google/start?purpose=sheets" in r["text"] for r in ctx.chat.store.list())

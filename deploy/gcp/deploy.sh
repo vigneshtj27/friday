@@ -36,6 +36,7 @@ DATA_DISK=$TAG-data
 SA_NAME=$TAG-vm
 SA="$SA_NAME@$PROJECT.iam.gserviceaccount.com"
 SECRETS=(rv-fri-master-key rv-fri-admin-password-hash rv-fri-anthropic-api-key)
+OPTIONAL_SECRETS=(rv-fri-google-client-id rv-fri-google-client-secret)
 DEPLOY_REF=${DEPLOY_REF:-origin/main}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -235,8 +236,25 @@ destroy() {
   $G compute firewall-rules delete "$TAG-allow-web" || true
   $G compute networks subnets delete "$SUBNET" --region="$REGION" || true
   $G compute networks delete "$NET" || true
-  for s in "${SECRETS[@]}"; do $G secrets delete "$s" || true; done
+  for s in "${SECRETS[@]}" "${OPTIONAL_SECRETS[@]}"; do $G secrets delete "$s" || true; done
   $G iam service-accounts delete "$SA" || true
+}
+
+google_client() {
+  say "Google OAuth client for Gmail codes and Sheets (see docs/google.md)"
+  local id secret
+  id=${FRIDAY_GOOGLE_CLIENT_ID:-}
+  [ -n "$id" ] || read -rp "  OAuth client ID: " id
+  secret=${FRIDAY_GOOGLE_CLIENT_SECRET:-}
+  [ -n "$secret" ] || { read -rsp "  OAuth client secret: " secret; echo; }
+  printf '%s' "$id" | put_secret rv-fri-google-client-id
+  printf '%s' "$secret" | put_secret rv-fri-google-client-secret
+  for s in rv-fri-google-client-id rv-fri-google-client-secret; do
+    $G secrets add-iam-policy-binding "$s" --member="serviceAccount:$SA" \
+      --role=roles/secretmanager.secretAccessor >/dev/null
+  done
+  echo "  stored; restarting friday so it picks them up"
+  ssh_vm "sudo /usr/local/bin/rv-fri-up" >/dev/null
 }
 
 case "${1:-all}" in
@@ -246,6 +264,7 @@ case "${1:-all}" in
   tunnel) tunnel ;;
   public) public ;;
   private) private ;;
+  google-client) google_client ;;
   destroy) destroy ;;
-  *) echo "usage: $0 [all|ship|tunnel|public|private|destroy]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|ship|tunnel|public|private|google-client|destroy]" >&2; exit 2 ;;
 esac

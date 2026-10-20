@@ -14,7 +14,10 @@ from friday.login.diagnosis import Diagnoser
 from friday.chat import ChatNotifier, ChatStore
 from friday.notify import MultiNotifier, build_notifier
 from friday.otp.broker import OtpBroker
+from friday.google_oauth import GoogleAuth
 from friday.otp.gmail import GmailClient
+from friday.prefs import Prefs
+from friday.sheets import SheetsClient
 from friday.profiles.display import DisplayAllocator
 from friday.profiles.manager import ProfileManager, SiteRegistry
 from friday.runs import RunStore
@@ -47,6 +50,9 @@ class AppContext:
     notifier: MultiNotifier
     chat: ChatNotifier
     gmail: GmailClient
+    google: Any
+    sheets: Any
+    prefs: Any
     broker: OtpBroker
     diagnoser: Diagnoser
     transactions: TransactionStore
@@ -79,11 +85,9 @@ def build_context(
     chat = ChatNotifier(ChatStore(db, redactor))
     notifier = build_notifier(settings, redactor, chat)
     gate = ApprovalGate(db, audit, redactor, ttl_seconds=settings.approval_ttl_seconds)
-    gmail = GmailClient(
-        settings.google_client_id,
-        settings.google_client_secret.get_secret_value() if settings.google_client_secret else None,
-        vault,
-    )
+    google_secret = settings.google_client_secret.get_secret_value() if settings.google_client_secret else None
+    gmail = GmailClient(settings.google_client_id, google_secret, vault)
+    google = GoogleAuth(settings.google_client_id, google_secret, vault)
     broker = OtpBroker(
         db, audit, vault, redactor, notifier, gmail,
         owner_timeout=settings.otp_timeout_seconds, email_timeout=settings.email_otp_timeout_seconds,
@@ -94,7 +98,7 @@ def build_context(
         settings=settings, db=db, cipher=cipher, redactor=redactor, audit=audit, vault=vault,
         injector=SecretInjector(vault, audit), sites=sites, displays=displays, profiles=profiles,
         handoffs=handoffs, supervisor=SessionSupervisor(profiles, handoffs), runs=RunStore(db, redactor),
-        files=files, sitenotes=SiteNotes(db, redactor), gate=gate, notifier=notifier, chat=chat, gmail=gmail,
+        files=files, sitenotes=SiteNotes(db, redactor), gate=gate, notifier=notifier, chat=chat, gmail=gmail, google=google, sheets=SheetsClient(google), prefs=Prefs(db),
         broker=broker, diagnoser=diagnoser, transactions=TransactionStore(db),
     )  # fmt: skip
     gate.notify = notifier.send

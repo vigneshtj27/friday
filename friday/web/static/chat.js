@@ -139,8 +139,8 @@ function cardHTML(m) {
       </form></div>`;
   }
   if (m.kind === "run") {
-    const title = { fetch_statement: "Statement fetch", login: "Sign-in", task: "Task" }[c.kind] || "Run";
-    const what = c.kind === "task" ? c.goal : c.kind === "fetch_statement" && c.start ? `${c.start} to ${c.end}` : "";
+    const title = { fetch_statement: "Statement fetch", fetch_activity: "Recent activity", login: "Sign-in", task: "Task" }[c.kind] || "Run";
+    const what = c.kind === "task" ? c.goal : c.start ? `${c.start} to ${c.end}${c.sheet_tab ? ` → sheet tab '${c.sheet_tab}'` : ""}` : "";
     const busy = c.status === "running" || c.status === "queued";
     return head(title, acct) + `<div class="card-main">
       ${what ? `<p class="card-sub">${esc(what)}</p>` : ""}

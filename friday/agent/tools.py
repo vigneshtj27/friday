@@ -141,19 +141,25 @@ SUBMIT_QUIET_SECONDS = 1.0  # no submit-type request in flight for this long = t
 FOCUSED_JS = "() => document.activeElement && document.activeElement.getAttribute('data-friday-ref')"
 MARK_SECRET_JS = "(ref) => { const el = document.querySelector(`[data-friday-ref=\"${ref}\"]`); if (el) el.setAttribute('data-friday-secret', '1'); }"
 
+# HTML tables and ARIA tables/grids (many sites draw lists of transactions with divs and roles).
 TABLE_JS = r"""
 ([ref, index]) => {
+  const TABLES = 'table, [role="table"], [role="grid"], [role="treegrid"]';
+  const ROWS = 'tr, [role="row"]';
+  const CELLS = 'th, td, [role="cell"], [role="gridcell"], [role="columnheader"], [role="rowheader"]';
   let table = null;
-  if (ref) { const el = document.querySelector(`[data-friday-ref="${ref}"]`); table = el && el.closest('table'); }
-  if (!table) table = document.querySelectorAll('table')[index || 0];
+  if (ref) { const el = document.querySelector(`[data-friday-ref="${ref}"]`); table = el && el.closest(TABLES); }
+  if (!table) table = document.querySelectorAll(TABLES)[index || 0];
   if (!table) return null;
   const rows = [];
-  for (const tr of table.querySelectorAll('tr')) {
-    const cells = Array.from(tr.querySelectorAll('th, td')).map(c => c.innerText.replace(/\s+/g, ' ').trim());
+  const all = Array.from(table.querySelectorAll(ROWS)).filter(r => r.closest(TABLES) === table);
+  for (const tr of all) {
+    const cells = Array.from(tr.querySelectorAll(CELLS)).filter(c => c.closest(ROWS) === tr)
+      .map(c => c.innerText.replace(/\s+/g, ' ').trim());
     if (cells.some(c => c)) rows.push(cells);
     if (rows.length >= 300) break;
   }
-  return {rows, total: table.querySelectorAll('tr').length};
+  return {rows, total: all.length};
 }
 """
 
@@ -210,6 +216,9 @@ class ToolExecutor:
         self.snapshot: Snapshot | None = None
         self.blocked_navigations: list[str] = []
         self.downloads: list[dict[str, Any]] = []
+        # What the agent actually read, for capabilities that must ground extracted data in the page.
+        self.tables: list[dict[str, Any]] = []  # {"url", "rows"} per extract_table call
+        self.page_texts: list[str] = []  # visible text of each page read (redacted), most recent last
         self.last_submit: dict[str, Any] | None = None  # set when the last action submitted a form
         self._started = False
         self._inflight: dict[Any, float] = {}  # request -> loop time it started (submit-type requests only)
@@ -493,6 +502,7 @@ class ToolExecutor:
     async def _t_read_page(self, args: dict[str, Any], el: Any) -> ToolResult:
         snap = await self.refresh()
         body = self.d.redactor.redact(snap.render())
+        self.page_texts = [*self.page_texts[-19:], self.d.redactor.redact("\n".join([snap.text, *snap.frames_text]))]
         note = ""
         if self.blocked_navigations:
             note = f"\nNote: blocked navigation(s) to non-allowlisted URLs: {self.blocked_navigations[-3:]}"
@@ -556,6 +566,7 @@ class ToolExecutor:
         if not data:
             return ToolResult("No table found.", is_error=True)
         body = self.d.redactor.redact(json.dumps(data["rows"]))
+        self.tables.append({"url": self.page.url, "rows": json.loads(body)})
         return ToolResult(
             f"<untrusted_page_content>{body}</untrusted_page_content>\n{len(data['rows'])} of {data['total']} rows."
         )
