@@ -75,6 +75,10 @@ class LaunchRequest:
             f"--window-size={self.window_width},{self.window_height}",
             "--window-position=0,0",
         ]
+        if self.proxy:
+            # Without this, a STUN request goes out over UDP directly and exposes the host's own
+            # address next to the proxy's. WebRTC stays available (a missing API is itself odd).
+            args.append("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
         return args
 
     def macos_language_args(self) -> list[str]:

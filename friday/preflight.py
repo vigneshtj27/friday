@@ -91,6 +91,11 @@ class Report:
         return "\n".join(lines)
 
 
+def is_local_site(site: Any) -> bool:
+    """The mock bank and other test sites on this machine: no network identity to check."""
+    return bool(site) and all(d in LOCAL for d in site.all_domains)
+
+
 def cli(args: str) -> str:
     """How the owner runs a friday command on the deployed server, from their laptop."""
     return f"deploy/gcp/deploy.sh cli {args}"
@@ -173,7 +178,7 @@ class Preflight:
         profile = ctx.profiles.get(profile_id)
         site = ctx.sites.get(profile.site_id)
         items: list[Item] = []
-        local = bool(site) and all(d in LOCAL for d in site.all_domains)
+        local = is_local_site(site)
         driver = ctx.profiles.effective_driver(profile.config)
         if local:
             items.append(Item("network", True, "local test site: driver, proxy and egress checks skipped"))
@@ -203,6 +208,7 @@ class Preflight:
                 seen = f"{eg.get('ip')} {eg.get('org')} ({eg.get('country')})" if not eg.get("error") else "the server's own IP"
                 items.append(Item("egress", False, f"no proxy, so the site sees {seen}",
                                   [f"deploy/egress.sh {profile_id} <home-tailscale-ip>"]))  # fmt: skip
+            items.append(self._browser_item(profile))
         from friday.profiles.doctor import examine
 
         doc = examine(ctx.profiles, profile)
@@ -222,6 +228,19 @@ class Preflight:
         rep = Report(profile_id, items, iso())
         ctx.prefs.set(f"preflight:{profile_id}", rep.public())
         return rep
+
+    def _browser_item(self, profile: Any) -> Item:
+        """The last browser self-check (IPv4/IPv6/WebRTC leaks and what the page sees) for this proxy."""
+        bc = getattr(self.ctx, "browsercheck", None)
+        r = bc.cached(profile) if bc else None
+        if r is None:
+            return Item("browser", True, "no browser self-check for this proxy in the last 24 h: the leak check runs in the "
+                        f"browser before the sign-in (full check: {cli(f'browser-check {profile.id}')})")  # fmt: skip
+        bad = [i for i in r["items"] if not i["ok"]]
+        if not bad:
+            return Item("browser", True, f"self-check ({r['scope']}, {r['checked_at'][:16]}Z): no leaks, page sees a consistent browser")
+        return Item("browser", False, "; ".join(f"{i['name']}: {i['detail']}" for i in bad),
+                    sorted({f for i in bad for f in i.get("fix") or []}) + [cli(f"browser-check {profile.id}")])  # fmt: skip
 
     # ---- one deliberate attempt -------------------------------------------------------
 

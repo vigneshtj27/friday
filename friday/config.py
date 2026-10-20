@@ -92,6 +92,10 @@ class Settings(BaseSettings):
 
     # diagnosis
     geoip_url: str | None = "https://ipinfo.io/json"
+    # Neutral pages the browser itself loads to check for leaks (friday/browsercheck.py). Never a bank.
+    ip_echo_url: str = "https://api.ipify.org/?format=json"
+    ip6_echo_url: str | None = "https://api6.ipify.org/?format=json"
+    webrtc_stun_url: str | None = "stun:stun.l.google.com:19302"
     diag_alt_proxy: str | None = None
 
     # web

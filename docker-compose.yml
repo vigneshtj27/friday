@@ -25,6 +25,8 @@ services:
       - "127.0.0.1:8765:8765"
     volumes:
       - ${FRIDAY_HOST_DATA:-./data}:/data
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1   # no IPv6 path around the browser's proxy
     shm_size: 1gb                  # Chrome needs more than Docker's 64 MB /dev/shm
     security_opt:
       # Docker's default seccomp profile + the namespace syscalls Chrome's sandbox needs.

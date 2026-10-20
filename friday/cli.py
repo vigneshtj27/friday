@@ -264,6 +264,75 @@ def profile_set_identity(
     _doctor_after_change(profile_id)
 
 
+# One locale + timezone per country, for countries with one main zone. Others: pass --timezone.
+REGIONS = {
+    "IN": ("en-IN", "Asia/Kolkata"), "GB": ("en-GB", "Europe/London"), "SG": ("en-SG", "Asia/Singapore"),
+    "AE": ("en-AE", "Asia/Dubai"), "IE": ("en-IE", "Europe/Dublin"), "NZ": ("en-NZ", "Pacific/Auckland"),
+    "DE": ("de-DE", "Europe/Berlin"), "FR": ("fr-FR", "Europe/Paris"), "JP": ("ja-JP", "Asia/Tokyo"),
+    "US": ("en-US", None), "CA": ("en-CA", None), "AU": ("en-AU", None),
+}  # fmt: skip
+
+
+@profile_app.command("set-region")
+def profile_set_region(
+    profile_id: str,
+    country: Annotated[str, typer.Argument(help="two-letter country of the egress IP, e.g. IN")],
+    timezone: Annotated[Optional[str], typer.Option(help="IANA zone, for countries with several (US, CA, AU)")] = None,
+):
+    """Set locale and timezone for a country in one step, and check them against the proxy's IP country."""
+    from zoneinfo import ZoneInfo
+
+    cc = country.upper()
+    if cc not in REGIONS:
+        typer.secho(f"unknown region {cc}; known: {', '.join(sorted(REGIONS))}. Use set-identity instead.", fg="red", err=True)
+        raise typer.Exit(2)
+    locale, tz = REGIONS[cc]
+    tz = timezone or tz
+    if tz is None:
+        typer.secho(f"{cc} has several timezones; pass --timezone (e.g. America/New_York).", fg="red", err=True)
+        raise typer.Exit(2)
+    ZoneInfo(tz)
+    ctx = _ctx()
+    profile = ctx.profiles.get(profile_id)
+    ctx.profiles.update_config(profile_id, profile.config.model_copy(update={"locale": locale, "timezone": tz}), actor="cli")
+    typer.echo(f"{profile_id}: region {cc}: locale {locale}, timezone {tz}")
+    host_tz = ctx.settings.default_timezone
+    if host_tz and host_tz != tz:
+        typer.secho(f"note: the server's FRIDAY_DEFAULT_TIMEZONE/TZ is {host_tz}; the browser gets {tz} per launch, "
+                    "but keep them the same (deploy.sh TIMEZONE=...) so logs and schedules agree.", fg="yellow")  # fmt: skip
+    profile = ctx.profiles.get(profile_id)
+    if profile.config.proxy is None:
+        typer.secho("no proxy yet: the egress country can't be checked (deploy/egress.sh).", fg="yellow")
+    else:
+        eg = asyncio.run(ctx.preflight.egress(profile, fresh=True))
+        if eg.get("error"):
+            typer.secho(f"couldn't look up the proxy's IP: {eg['error']}", fg="red")
+            raise typer.Exit(1)
+        if (eg.get("country") or "").upper() != cc:
+            typer.secho(f"MISMATCH: the proxy exits in {eg.get('country')} ({eg.get('ip')} {eg.get('org')}), not {cc}.", fg="red")
+            raise typer.Exit(1)
+        typer.echo(f"egress {eg.get('ip')} {eg.get('org')} is in {cc}: consistent.")
+    _doctor_after_change(profile_id)
+
+
+@app.command("browser-check")
+def browser_check_cmd(
+    profile_id: str,
+    as_json: Annotated[bool, typer.Option("--json", help="print the report as JSON")] = False,
+):
+    """Open the profile's real browser on neutral IP-echo pages (never a bank) and report what a site would see."""
+    from friday.browsercheck import report_lines
+
+    ctx = _ctx()
+    rep = asyncio.run(ctx.browsercheck.run(profile_id))
+    if as_json:
+        typer.echo(json.dumps(rep, default=str))
+    else:
+        for line in report_lines(rep):
+            typer.echo(line)
+    raise typer.Exit(0 if rep["ok"] else 1)
+
+
 @site_app.command("set-otp-senders")
 def site_set_otp_senders(site_id: str, sender: Annotated[list[str], typer.Argument(help="addresses or @domains")]):
     """Replace a site's OTP email senders (used to find codes in Gmail)."""

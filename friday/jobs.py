@@ -234,6 +234,29 @@ class JobRunner:
         await ctx.notifier.send(rep.chat_message(), None, meta={"kind": "run", "ref": run_id, "profile_id": profile.id})
         return True
 
+    async def _leaks_block(self, run_id: str, kind: str, op: Any, page: Any) -> bool:
+        """Before the site is opened: check, in this browser, that IPv4/IPv6/WebRTC don't bypass the proxy."""
+        from friday.preflight import SIGNIN_KINDS, is_local_site
+
+        ctx = self.ctx
+        if kind not in SIGNIN_KINDS or ctx.settings.preflight == "off" or is_local_site(op.site):
+            return False
+        if ctx.browsercheck.cached(op.profile) is not None:
+            return False  # preflight already judged the cached result
+        items = await ctx.browsercheck.leaks_in_session(op.profile, page)
+        ctx.runs.step(run_id, "browser-check", result="; ".join(f"{i.name}: {'ok' if i.ok else 'FAIL ' + i.detail}" for i in items))
+        bad = [i for i in items if not i.ok]
+        if not bad or ctx.settings.preflight == "warn":
+            return False
+        names = ", ".join(i.name for i in bad)
+        msg = [f"I didn't open {op.site.name} for {op.profile.id}: the browser leaks around the proxy ({names}). Not counted as a bounce."]
+        for i in bad:
+            msg += [f"- {i.name}: {i.detail}", *(f"  fix: {f}" for f in i.fix)]
+        ctx.runs.finish(run_id, RunStatus.NEEDS_ATTENTION, f"Browser leak check failed: {names}.", {"browser_check": [i.name for i in bad]})
+        ctx.audit.record("preflight.blocked", target=op.profile.id, run=run_id, failed=[f"browser:{i.name}" for i in bad])
+        await ctx.notifier.send("\n".join(msg), None, meta={"kind": "run", "ref": run_id, "profile_id": op.profile.id})
+        return True
+
     async def _run_browser_job(self, run_id: str, kind: str, params: dict[str, Any], profile: Any) -> str | None:
         ctx = self.ctx
         if await self._preflight_blocks(run_id, kind, params, profile):
@@ -244,6 +267,8 @@ class JobRunner:
             for w in op.warnings:
                 ctx.runs.step(run_id, "warning", result=w)
             page = await op.session.page()
+            if await self._leaks_block(run_id, kind, op, page):
+                return None
             recorder = PageRecorder(ctx.redactor)
             recorder.attach(op.session.context)
             ex = self._executor(op, page, run_id, llm)

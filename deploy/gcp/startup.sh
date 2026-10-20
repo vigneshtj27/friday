@@ -24,6 +24,15 @@ mkdir -p "$MNT/data"
 chown 1000:1000 "$MNT/data"   # uid of the friday user inside the image
 chmod 700 "$MNT/data"
 
+# ---- no IPv6 -------------------------------------------------------------------
+# A browser behind an IPv4 proxy must not reach sites over IPv6 directly (it would show the VM's
+# own address). The subnet is IPv4-only today; this keeps it so if that ever changes.
+cat > /etc/sysctl.d/90-rv-fri-no-ipv6.conf <<'SYS'
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+SYS
+sysctl --system >/dev/null || true
+
 # ---- docker -------------------------------------------------------------------
 if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
   apt-get update

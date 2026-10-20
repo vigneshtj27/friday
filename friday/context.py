@@ -62,6 +62,7 @@ class AppContext:
     tools: Any = field(default=None)
     scheduler: Any = field(default=None)
     preflight: Any = field(default=None)
+    browsercheck: Any = field(default=None)
     onboarding: Any = field(default=None)
 
     def portal_link(self, fragment: str = "") -> str:
@@ -130,6 +131,9 @@ def build_context(
     from friday.preflight import Preflight
 
     ctx.preflight = Preflight(ctx)
+    from friday.browsercheck import BrowserCheck
+
+    ctx.browsercheck = BrowserCheck(ctx)
     from friday.onboarding import Onboarding
 
     ctx.onboarding = Onboarding(ctx)

@@ -12,7 +12,8 @@
 #   4. sets the profile's proxy (password into the vault, never on a command line) and
 #      switches it to the patchright driver (NO_PATCHRIGHT=1 to skip);
 #   5. runs `friday preflight <profile> --fresh` and refuses to finish if the IP the site
-#      will see is a datacenter/hosting network or not in the profile's country.
+#      will see is a datacenter/hosting network or not in the profile's country;
+#   6. runs `friday browser-check <profile>` (IPv4/IPv6/WebRTC leaks, languages, timezone).
 #
 # One proxy per profile, never rotated. The home machine needs Tailscale (same tailnet)
 # and a friday checkout (`uv sync`). Same PROJECT/ZONE defaults as deploy/gcp/deploy.sh.
@@ -93,3 +94,6 @@ print("\nEgress OK: %s AS%s (%s) via %s." % (eg.get("ip"), eg.get("asn"), eg.get
 if not r["ok"]:
     print("Other preflight items still fail; fix them before the next sign-in (see above).")
 EOF
+
+say "6. Browser self-check (neutral IP-echo pages only, never the bank)"
+in_app "browser-check $PROFILE" || { echo "browser-check found problems (above); fix them before the next sign-in." >&2; exit 1; }
