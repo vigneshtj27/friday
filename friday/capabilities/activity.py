@@ -259,6 +259,8 @@ class FetchActivity:
         debits = sum((t.amount for t in in_range if t.direction == "debit"), Decimal(0))
         credits = sum((t.amount for t in in_range if t.direction == "credit"), Decimal(0))
         result["totals"] = {"debits": str(debits), "credits": str(credits), "currency": currency}
+        result["counts"] = {"total": len(in_range), "debits": sum(1 for t in in_range if t.direction == "debit"),
+                            "credits": sum(1 for t in in_range if t.direction == "credit")}  # fmt: skip
         summary = (
             f"Activity {start}..{end}: {len(in_range)} transactions ({new} new, {dupes} already stored); "
             f"charges {currency} {debits:,.2f}, credits {currency} {credits:,.2f}."

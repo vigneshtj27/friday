@@ -245,3 +245,17 @@ def test_callback_needs_a_valid_state(ctx):
         r = c.get("/oauth/google/callback", params={"state": "forged", "code": "x"})
         assert r.status_code == 200 and "expired or was already used" in r.text
         assert c.get("/oauth/google/start", follow_redirects=False).headers["location"].startswith("/login")
+
+
+def test_two_cards_with_identical_charges_are_both_kept():
+    from friday.sheets import check_after
+
+    header = [["Date", "Description", "Amount", "Card"]]
+    amex = plan_append(header, OCT[:1], source_label="American Express", start=START, end=END)
+    shown = header + [["18/10/2026", "SWIGGY BANGALORE", "642.00", "American Express"]]
+    hdfc = plan_append(shown, OCT[:1], source_label="HDFC Bank", start=START, end=END)
+    assert len(amex.rows) == 1 and len(hdfc.rows) == 1 and hdfc.already_in_sheet == 0
+    after = shown + [["18/10/2026", "SWIGGY BANGALORE", "642.00", "HDFC Bank"]]
+    v = check_after(after, hdfc, start=START, end=END, rows_before=1)
+    assert v["ok"] and v["rows_in_range"] == 1 and v["total_in_range"] == "642.00"  # only this card's rows
+

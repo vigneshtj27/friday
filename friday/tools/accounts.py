@@ -86,15 +86,15 @@ class BrowserRun(Tool):
 
 
 async def wait_for_run(ctx: Any, run_id: str, call: Call, *, note: str | None = None, poll: float = 1.0) -> dict[str, Any]:
-    last_step, last_said, said_at = 0, None, 0.0
+    last_step, last_said = 0, None
     deadline = time.monotonic() + RUN_WAIT_SECONDS
     while True:
         for s in ctx.runs.steps(run_id, after_id=last_step):
             last_step = s["id"]
             line = progress_line({**s, "args_json": json.dumps(s.get("args") or {})})
-            if line and line != last_said and time.monotonic() - said_at > 2:
+            if line and line != last_said:  # repeated lines (e.g. two tables) are said once
                 await call.say(line)
-                last_said, said_at = line, time.monotonic()
+                last_said = line
         r = ctx.runs.get(run_id)
         if r and RunStatus(r["status"]) in TERMINAL:
             break
@@ -104,7 +104,7 @@ async def wait_for_run(ctx: Any, run_id: str, call: Call, *, note: str | None = 
     result = r.get("result") or {}
     out = {"run_id": run_id, "kind": r["kind"], "account": r["profile_id"], "status": r["status"], "summary": r["summary"],
            "params": r["params"]}  # fmt: skip
-    for k in ("stored", "totals", "verification", "files", "answer", "data", "tables", "source", "login_state", "diagnosis_report"):
+    for k in ("stored", "totals", "counts", "verification", "files", "answer", "data", "tables", "source", "login_state", "diagnosis_report"):
         if k in result:
             out[k] = result[k]
     if note:

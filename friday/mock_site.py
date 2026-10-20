@@ -52,6 +52,24 @@ def _transactions() -> list[dict]:
 TXNS = _transactions()
 
 
+def card_activity(today: date | None = None) -> list[dict]:
+    """A card's recent activity relative to `today`: this month up to today, plus the end of last month.
+    Plain amounts are charges; a minus sign is a refund; 'CR' is a payment."""
+    today = today or date.today()
+    first = today.replace(day=1)
+    prev = first - timedelta(days=1)
+    rows = [
+        (prev.replace(day=min(28, prev.day)), "UBER INDIA", "310.00", "debit"),
+        (first, "PAYMENT RECEIVED - THANK YOU", "45,210.55 CR", "credit"),
+        (first.replace(day=min(3, today.day)), "SWIGGY BANGALORE", "642.00", "debit"),
+        (first.replace(day=min(7, today.day)), "AMAZON PAY INDIA", "1,299.00", "debit"),
+        (first.replace(day=min(9, today.day)), "AMAZON REFUND", "-199.00", "credit"),
+        (first.replace(day=min(12, today.day)), "BIGBASKET", "2,045.60", "debit"),
+        (today, "BLINKIT", "415.50", "debit"),  # pending
+    ]
+    return [{"date": d, "desc": desc, "amount": amt, "dir": dr, "pending": i == len(rows) - 1} for i, (d, desc, amt, dr) in enumerate(rows)]
+
+
 def _pdf(lines: list[str]) -> bytes:
     """Minimal single-font PDF, enough for text extraction."""
     def esc(s: str) -> str:
@@ -248,7 +266,7 @@ def create_mock_app() -> FastAPI:
         return page(
             "Account summary - MockBank",
             f"""<p>Welcome back, Alice</p><nav><a href=/s/{sc}/statements>Statements</a> |
-<a href=/s/{sc}/transfer>Transfer money</a> | <a href=/s/{sc}/logout>Sign out</a></nav>
+<a href=/s/{sc}/activity>Recent activity</a> | <a href=/s/{sc}/transfer>Transfer money</a> | <a href=/s/{sc}/logout>Sign out</a></nav>
 <h3>Account summary</h3><p>Savings XX4821 - Available balance: {TXNS[-1]['balance']:.2f}</p>""",
         )
 
@@ -274,6 +292,28 @@ def create_mock_app() -> FastAPI:
             return RedirectResponse(f"/s/{sc}/login", status_code=303)
         transfers.append({"payee": payee, "amount": amount})
         return page("Done", f"<p>Transferred {html.escape(amount)} to {html.escape(payee)}.</p><a href=/s/{sc}/logout>Sign out</a>")
+
+    @app.get("/s/{sc}/activity")
+    async def activity(request: Request, sc: str):
+        if not require_in(request, sc):
+            return RedirectResponse(f"/s/{sc}/login", status_code=303)
+        acts = card_activity()
+        posted = "".join(
+            f'<div role=row><span role=gridcell>{a["date"].strftime("%b %d")}</span><span role=gridcell>{html.escape(a["desc"])}</span>'
+            f'<span role=gridcell>{"-" if a["amount"].startswith("-") else ""}₹{a["amount"].lstrip("-")}</span></div>'
+            for a in reversed(acts) if not a["pending"]
+        )
+        pending = "".join(
+            f'<tr><td>{a["date"].strftime("%d %b")}</td><td>{html.escape(a["desc"])}</td><td>REF {80000000 + i}</td><td>₹{a["amount"]}</td></tr>'
+            for i, a in enumerate(acts) if a["pending"]
+        )
+        return page(
+            "Recent activity - MockBank",
+            f"""<h2>Recent activity</h2><div role=grid aria-label="Posted transactions">
+<div role=row><span role=columnheader>Date</span><span role=columnheader>Description</span><span role=columnheader>Amount</span></div>
+{posted}</div><h3>Pending</h3><table>{pending}</table>
+<p><a href=/s/{sc}/home>Back to summary</a> | <a href=/s/{sc}/logout>Sign out</a></p>""",
+        )
 
     @app.get("/s/{sc}/statements")
     async def statements(request: Request, sc: str):

@@ -12,10 +12,13 @@ code so claims here can be checked against it.
 
 ## 1. What friday is
 
-friday is a **self-hosted, single-user browser agent**. The owner talks to it in a chat; it drives a
-**real Google Chrome** on the owner's *own* online accounts (banks, cards, utilities, shopping) and
-finishes whole tasks — the first built-in capability is "fetch my statement for a date range", which
-downloads the file, parses it, verifies it and stores normalised transactions.
+friday is a **self-hosted, single-user personal assistant**. The owner gives it any task in the chat;
+a **planner** breaks it into steps over a **tool layer** — a **real Google Chrome** on the owner's
+*own* online accounts (banks, cards, utilities, shopping), the owner's Google Sheets, Gmail and
+Drive, the web, stored files, long-term memory and schedules — runs them, **verifies** the result in
+code, and reports back. The browser is one tool among several. Its built-in capabilities include
+fetching a statement or a card's recent activity, which are parsed, verified and stored as
+normalised transactions (see §16 for the assistant layer).
 
 Design principles, enforced in code, not just prompts:
 
@@ -53,8 +56,8 @@ when a diagnosis shows a concrete need.
   (XChaCha20-Poly1305). Chrome profiles live on a volume the app requires to be encrypted.
 - **Packaging:** one Docker image (Chrome + Xvfb + x11vnc + noVNC + the app). Deployed to a single
   GCE VM behind an HTTPS reverse proxy.
-- **Size:** ~8k lines of app code across ~60 modules, ~2.5k lines of tests (183 unit + 17 real-Chrome,
-  all passing). File tree with line counts is in §13.
+- **Size:** ~12.8k lines of app code across 79 modules; 246 unit tests + 21 real-Chrome tests (mock
+  bank and fixture pages), all passing. File tree in §13.
 
 Everything is one process: the FastAPI app, the job queue, the agent, and the browser sessions share
 an event loop and an in-memory `AppContext` (`friday/context.py`) that wires every component together.
@@ -64,31 +67,29 @@ an event loop and an in-memory `AppContext` (`friday/context.py`) that wires eve
 ## 3. Request lifecycle (the 30-second mental model)
 
 ```
-owner (chat)
-  │  "get my amex expenses this month"
+owner (chat)  "fetch and populate my Oct Amex expenses into the sheet"
+  │  a code? → straight to the waiting sign-in (never to the model)
   ▼
-ChatAssistant (friday/assistant.py)   ── LLM with tools over friday's own state
-  │  no amex account / credentials?
-  ├─► find_site ─ SiteFinder (web search, validated in code)
-  │   request_setup ─ posts a secure setup card in the chat
-  │        owner fills card → values go straight to the vault (never to the model)
-  │        Onboarding.complete() creates site+profile, saves secrets, starts the job
+Planner (friday/planner.py)   ── one call plans the steps: tool, args ($ref to earlier results),
+  │                               progress line, success checks; memory + accounts in context
   ▼
-JobRunner (friday/jobs.py)   ── one worker per profile; per-site lock; backoff
-  │  opens the persistent Chrome profile (ProfileManager)
+ToolRegistry.call (friday/tools/base.py)   ── for EVERY step: validate args, gate (approval card
+  │                                            for send/share/spend/publish and risky writes),
+  │                                            owner-quote rule, audit, redact, mark untrusted
+  ├─► browser_run ─► JobRunner ─► LoginEngine ─► AgentLoop ─► capability (fetch_activity,
+  │                  (friday/jobs.py: per-profile worker,       fetch_statement, task): parse,
+  │                   per-site lock, backoff; persistent         verify, dedupe → TransactionStore
+  │                   Chrome profile; OTP, approvals,            (progress lines stream to the
+  │                   handoffs, diagnosis as before)             plan card in the chat)
+  ├─► sheets_* / gmail_* / drive_*  (owner's Google, one OAuth grant, token in the vault)
+  ├─► web_search / web_fetch / files_read / table_compute / memory_* / schedule_*
+  │   accounts, setup cards (onboarding: secrets go from a form straight to the vault)
   ▼
-LoginEngine (friday/login/engine.py)   ── reuse session, else sign in
-  │  after every step: classify page state; one defined next action per state
-  │  OTP → OtpBroker;  approval → ApprovalGate;  CAPTCHA/unknown → human handoff
-  │  silent bounce / block → Diagnoser
+checks evaluated in code against each result; a failure → replan with the evidence (≤ 2),
+then a blocker; a denied approval ends the plan
   ▼
-AgentLoop (friday/agent/loop.py)   ── the capability runs: observe→decide→act→verify
-  │  tools gated by ActionPolicy; secrets by SecretInjector; downloads to FileStore
-  ▼
-Capability (fetch_statement / task)   ── parse, verify, dedupe → TransactionStore
-  │
-  ▼
-result posted back into the chat (+ audit log, run step log with masked screenshots)
+final chat message: what was done + "Verified: …" (only code-checked) + "Not independently
+verified: …"; the outcome is saved to memory
 ```
 
 ---
@@ -354,7 +355,14 @@ friday/
   sitenotes.py          site memory (hints, staleness)
   jobs.py               job queue: per-profile worker, per-site lock, backoff
   onboarding.py         add-account-from-chat: site finder, setup card, resume
-  assistant.py          chat brain: LLM with tools over friday's state
+  assistant.py          chat entry: hands requests to the planner; account/run/setup handlers
+  planner.py            plan → execute → verify → report; replans; plan cards
+  memory.py             long-term memory (facts, decisions, outcomes)
+  scheduler.py          reminders + recurring jobs (loop over `schedules`)
+  sheets.py             Google Sheets client, column matching, append/verify
+  workspace.py          Gmail + Drive clients
+  google_oauth.py       owner's Google grants (workspace / gmail / sheets), PKCE, vault tokens
+  prefs.py              small owner preferences (saved expense sheet)
   chat.py               chat store + notifier (owner's delivery channel)
   egress.py             home egress proxy (residential IP)
   mock_site.py          local mock bank for tests/demos
@@ -365,11 +373,13 @@ friday/
   agent/      loop, tools, policy, approvals, snapshot, recorder, isolated, llm
   login/      classifier, engine (state machine), diagnosis (experiments + ranking)
   otp/        broker, gmail (read-only), totp, extract
-  capabilities/  statement, task, transactions (parse/verify/dedupe)
+  capabilities/  statement, activity, task, transactions (parse/verify/dedupe)
+  tools/      base (Tool, ToolRegistry: the gate), accounts (browser runs), google_tools,
+              web, files (table_compute), memory_tools, schedule_tools
   handoff/    manager, bridge (WebSocket↔VNC)
   web/        app, api (portal), chat_api, auth, static/(portal|chat).(html|js)
 deploy/gcp/   deploy.sh, startup.sh, compose.public.yml, Caddyfile, seccomp
-tests/        183 unit + 17 real-Chrome (mock bank), fakes, conftest
+tests/        246 unit + 21 real-Chrome (mock bank, fixture pages), fakes, fake_google, planner_fakes
 ```
 
 ---
@@ -379,7 +389,13 @@ tests/        183 unit + 17 real-Chrome (mock bank), fakes, conftest
 - **Untrusted:** every byte from a web page, email or downloaded file. It is wrapped and labelled as
   data for the model, never followed as instructions; it cannot trigger an approval, a navigation off
   the allowlist, or a secret into the wrong field.
-- **Trusted:** the owner, via the chat/portal (authenticated), and the system's own prompts.
+- **Trusted:** the owner, via the chat/portal (authenticated), schedules the owner created, and the
+  system's own prompts. Only these can start a plan.
+- **New with the assistant layer:** content from Gmail, Sheets, Drive and the web is untrusted like
+  page text: it reaches the planner only as quoted results or failure evidence. It cannot plant a
+  memory or a schedule (those tools need the owner's own words, checked in code), cannot redirect a
+  write to a sheet the owner didn't name (that needs a tap), and cannot send or share anything (always
+  a tap). `web_fetch` refuses non-public addresses, re-checked on every redirect.
 - **The model is semi-trusted:** it decides *what* to do but is boxed by the policy, the approval
   gate, the domain allowlist and the injector. A compromised or jailbroken model still cannot see a
   secret, pay money without a tap, or leave the allowlisted domains.
@@ -418,3 +434,45 @@ Suggested evaluation entry points, in order: `friday/vault/` (the core secret in
 `friday/agent/policy.py` + `approvals.py` (the read-only guarantee), `friday/agent/loop.py` +
 `snapshot.py` (prompt-injection posture), `friday/login/` (the autonomous sign-in and its honesty
 about failure), and `tests/` (what is actually proven vs asserted in prose).
+
+---
+
+## 16. The assistant layer: planner, tools, memory, schedules
+
+**Tools (`friday/tools/`).** Every capability is a `Tool` with a JSON schema and a declared *effect*:
+`read`, `write` (private to the owner), `send`, `share`, `spend`, `publish`. `ToolRegistry.call` is the
+single choke point: it validates arguments, decides in code whether the owner must approve (always
+for send/share/spend/publish; for a private write only when it targets something the owner didn't
+name, something other people can see — checked via Drive permissions, failing closed — or when
+`FRIDAY_APPROVE_PRIVATE_WRITES` is on), checks `owner_quote` for tools that store state for later
+(memory, schedules, the saved expense sheet), audits the call, redacts the result, and marks outside
+content as untrusted. Approval uses the same `ApprovalGate` card as browser runs; the model cannot
+approve. Tools: `browser_run` (waits for the run, streaming plain-language progress), accounts/setup
+and run state, Sheets (list, read, append rows, create tab, add stored transactions, remove only rows
+friday appended — ledger `sheet_rows` — and only if unchanged), Gmail (search, read, draft; send is
+gated), Drive (search, download, upload, share is gated), `web_search`, `web_fetch`, `files_read`,
+`table_compute` (totals computed in code from real cells), memory, schedules.
+
+**Planner (`friday/planner.py`).** One structured-output call returns the plan: steps with a tool,
+arguments (which may reference earlier results with `{"$ref": "s1.path"}`), an optional `fill`
+instruction (a small model call reads values out of earlier results), a progress line and success
+checks. Steps run through the registry; after each, its checks are evaluated in code against the real
+result, and tools add their own read-backs. A failed call or check replans with the failure as
+untrusted evidence (at most 2), then the owner gets a blocker; a denied approval ends the plan. The
+final message is written from the results; its "Verified" line comes only from passing checks and
+read-backs. Plans are stored in `plans` and shown as a live card (steps + progress); "status" while a
+plan runs is answered from its state without a model call.
+
+**Memory (`friday/memory.py`).** Facts and decisions from the owner's own words, outcomes written by
+code after each plan. All current facts plus relevant outcomes go into the planner's context; a newer
+fact on the same subject replaces the older; "forget" is a soft delete. Site know-how stays in site
+notes.
+
+**Schedules (`friday/scheduler.py`).** A loop in the app's event loop over `schedules`: reminders post
+into the chat; jobs run the owner's stored request through the planner with the same gates. Missed
+slots fire once.
+
+**Google.** One `workspace` grant (Sheets, `gmail.modify`, `drive.readonly`, `drive.file`) from a
+consent link in the chat; tokens in the vault under the reserved `system/` namespace; each feature uses
+the first connected grant that covers it, so the older gmail-only / sheets-only grants keep working.
+

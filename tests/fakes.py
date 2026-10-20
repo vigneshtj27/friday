@@ -100,6 +100,18 @@ class HeuristicLLM:
             if link:
                 return once(f"{url}:stmt", "click", {"ref": link["ref"]}) or self._use("read_page", {})
             return self._use("finish", {"status": "failed", "summary": "No statements section found."})
+        if "Read every transaction dated" in goal:  # activity fetch: open the activity page, extract its tables
+            if "/activity" in url:
+                for i in (0, 1):
+                    r = once(f"table{i}", "extract_table", {"index": i})
+                    if r:
+                        return r
+                return self._use("finish", {"status": "success", "summary": "Extracted the posted and pending activity.",
+                                            "notes": [{"kind": "statement_path", "text": "Recent activity link on the account summary."}]})
+            link = find("link", "activity")
+            if link:
+                return once(f"{url}:act", "click", {"ref": link["ref"]}) or self._use("read_page", {})
+            return self._use("finish", {"status": "failed", "summary": "No activity page found."})
         if "Transfer" in goal:
             btn = find("button", "pay now")
             if btn:

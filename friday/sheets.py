@@ -127,8 +127,10 @@ def map_columns(header: list[str], overrides: dict[str, str] | None = None) -> d
     return out
 
 
-def _key(d: date | None, amount: Decimal | None, desc: str) -> tuple[Any, ...]:
-    return (d, f"{amount:.2f}" if amount is not None else None, re.sub(r"[^a-z0-9]", "", desc.lower())[:16])
+def _key(d: date | None, amount: Decimal | None, desc: str, source: str = "") -> tuple[Any, ...]:
+    """Duplicate key. `source` (the Card/Account column, when the tab has one) keeps two cards' identical charges apart."""
+    norm = lambda x: re.sub(r"[^a-z0-9]", "", x.lower())  # noqa: E731
+    return (d, f"{amount:.2f}" if amount is not None else None, norm(desc)[:16], norm(source))
 
 
 @dataclass
@@ -141,6 +143,7 @@ class Plan:
     credits_left_out: int = 0
     blank_columns: list[str] = field(default_factory=list)
     total: Decimal = Decimal(0)
+    source: str = ""  # the Card/Account value written, when the tab has such a column
 
 
 def existing_keys(values: list[list[str]], header_row: int, mapping: dict[int, str], *, start: date, end: date) -> list[tuple[Any, ...]]:
@@ -153,7 +156,7 @@ def existing_keys(values: list[list[str]], header_row: int, mapping: dict[int, s
         get = lambda f: str(r[col[f]]) if f in col and col[f] < len(r) else ""  # noqa: E731
         d = parse_activity_date(get("date"), start=start, end=end, dayfirst=dayfirst) if get("date") else None
         a = parse_amount(get("amount") or get("debit") or get("credit"))
-        out.append(_key(d, abs(a[0]) if a else None, get("description")))
+        out.append(_key(d, abs(a[0]) if a else None, get("description"), get("source")))
     return out
 
 
@@ -165,7 +168,7 @@ def plan_append(
     h = find_header(values)
     header = [str(c) for c in values[h]]
     mapping = map_columns(header, column_map)
-    plan = Plan(h, mapping)
+    plan = Plan(h, mapping, source=source_label if "source" in set(mapping.values()) else "")
     plan.blank_columns = [header[i] for i, f in mapping.items() if f == "skip"] + [
         header[i] for i in range(len(header)) if header[i].strip() and i not in mapping
     ]
@@ -176,7 +179,7 @@ def plan_append(
         if t.direction == "credit" and not include_credits:
             plan.credits_left_out += 1
             continue
-        k = _key(t.date, t.amount, t.description)
+        k = _key(t.date, t.amount, t.description, source_label if "source" in fields else "")
         if k in have:
             plan.already_in_sheet += 1
             continue
@@ -216,6 +219,8 @@ def check_after(values: list[list[str]], plan: Plan, *, start: date, end: date, 
     total = Decimal(0)
     in_range = 0
     for r, k in zip(data, present):
+        if plan.source and k[3] != _key(None, None, "", plan.source)[3]:
+            continue  # another card's rows in a shared tab
         if k[0] is not None and start <= k[0] <= end and k[1] is not None:
             in_range += 1
             amt = Decimal(k[1])
@@ -349,6 +354,7 @@ async def export_transactions(
         "stored_transactions": len(txns),
         "already_in_sheet": plan.already_in_sheet,
         "credits_left_out": plan.credits_left_out,
+        "charges_considered": plan.already_in_sheet + len(plan.keys),
         "appended_total": str(plan.total),
         "columns_left_blank": plan.blank_columns,
         "spreadsheet": sid,
