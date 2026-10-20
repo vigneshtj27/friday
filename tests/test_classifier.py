@@ -109,3 +109,35 @@ def test_manual_login_failure_points_away_from_automation():
     assert causes[0]["cause"] == "ip_reputation"
     auto = next(c for c in causes + [{"cause": "automation_fingerprint", "score": -9}] if c["cause"] == "automation_fingerprint")
     assert auto["score"] < causes[0]["score"]
+
+
+CONFOUNDED_ENV = {"driver": "playwright", "pinned_webdriver": True, "egress": {"ip": "34.14.129.151", "org": "AS396982 Google LLC", "datacenter": True}}
+
+
+def test_manual_bounce_under_playwright_is_inconclusive():
+    """The live Amex case: a manual bounce in a webdriver-flagged browser doesn't clear automation."""
+    manual = {"name": "manual", "mode": "submit", "status": "done", "result_state": "SILENT_BOUNCE"}
+    report = {"profile_id": "amex.me", "trigger_state": "SILENT_BOUNCE", "capture": {}, "environment": CONFOUNDED_ENV,
+              "experiments": [manual]}
+    causes, nxt = rank_causes(report)
+    assert manual["verdict"] == "INCONCLUSIVE"
+    assert "preflight amex.me" in nxt and "INCONCLUSIVE" in nxt
+    auto = next(c for c in causes if c["cause"] == "automation_fingerprint")
+    assert auto["score"] > 0 and any("INCONCLUSIVE" in e for e in auto["evidence"])
+    assert any("datacenter" in e for c in causes for e in c["evidence"])
+
+
+def test_manual_bounce_under_patchright_discriminates():
+    env = {"driver": "patchright", "pinned_webdriver": False, "egress": {}}
+    manual = {"name": "manual", "mode": "submit", "status": "done", "result_state": "SILENT_BOUNCE"}
+    causes, nxt = rank_causes({"trigger_state": "SILENT_BOUNCE", "capture": {}, "environment": env, "experiments": [manual]})
+    assert "verdict" not in manual and "preflight" not in nxt
+    assert any("also fails" in e for c in causes for e in c["evidence"])
+
+
+def test_report_records_environment(ctx):
+    p = ctx.profiles.create("mybank", "me")
+    ctx.prefs.set("egress:mybank.me", {"ip": "34.14.129.151", "org": "AS396982 Google LLC", "asn": 396982, "datacenter": True})
+    rid = ctx.diagnoser.create(p.id, None, "SILENT_BOUNCE", {"capture": {}})
+    env = ctx.diagnoser.get(rid)["environment"]
+    assert env["driver"] == ctx.profiles.effective_driver(p.config) and env["egress"]["asn"] == 396982

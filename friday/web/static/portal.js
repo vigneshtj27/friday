@@ -193,9 +193,11 @@ async function diagDetail(id) {
   const r = await api(`/api/diagnosis/${id}`);
   const causes = r.causes.map((c) => `<tr><td><b>${esc(c.cause.replace(/_/g, " "))}</b></td><td>${esc(c.likelihood)} (${c.score})</td>
     <td>${c.confirmed ? '<span class="ok">confirmed by experiment</span>' : '<span class="warn">unconfirmed</span>'}</td><td><ul>${c.evidence.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></td></tr>`).join("");
-  const exps = (r.experiments || []).map((e) => `<tr><td>${esc(e.name)}</td><td>${esc(e.mode)}</td><td>${esc(e.variable || "")}</td><td>${esc(e.status)}</td><td>${esc(e.result_state || "")} ${e.http_status ? "HTTP " + e.http_status : ""}</td><td class="muted">${esc(e.reason || e.notes || "")}</td></tr>`).join("");
+  const exps = (r.experiments || []).map((e) => `<tr><td>${esc(e.name)}</td><td>${esc(e.mode)}</td><td>${esc(e.variable || "")}</td><td>${esc(e.status)}</td><td>${esc(e.result_state || "")} ${e.http_status ? "HTTP " + e.http_status : ""}${e.verdict ? ` <span class="warn">${esc(e.verdict)}</span>` : ""}</td><td class="muted">${esc(e.reason || e.notes || "")}</td></tr>`).join("");
   const cap = r.capture || {};
-  $view.innerHTML = card(`Diagnosis: ${esc(r.profile_id)} · ${esc(r.trigger_state)}`, `<p><b>Cheapest next experiment:</b> ${esc(r.next_experiment)}</p>
+  const env = r.environment || {}, eg = env.egress || {};
+  const envLine = r.environment ? `<p class="muted">Driver ${esc(env.driver)} · pinned navigator.webdriver ${esc(String(env.pinned_webdriver))} · proxy ${esc(env.proxy || "none")} · egress ${esc(eg.ip || "?")} ${esc(eg.org || "")}${eg.datacenter ? ' <span class="bad">datacenter</span>' : ""}</p>` : "";
+  $view.innerHTML = card(`Diagnosis: ${esc(r.profile_id)} · ${esc(r.trigger_state)}`, `<p><b>Cheapest next experiment:</b> ${esc(r.next_experiment)}</p>${envLine}
       <div class="row"><button class="primary" id="d-manual">Run manual-login test (remote view)</button><button id="d-probes">Re-run page-load probes</button></div>`)
     + card("Likely causes", `<table><tr><th>Cause</th><th>Likelihood</th><th>Status</th><th>Evidence</th></tr>${causes}</table>`)
     + card("Experiments (one variable each)", exps ? `<table><tr><th>Name</th><th>Mode</th><th>Variable</th><th>Status</th><th>Result</th><th>Notes</th></tr>${exps}</table>` : empty("None yet."))

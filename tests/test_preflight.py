@@ -237,3 +237,18 @@ def test_healthz_and_state_carry_version_egress_and_otp(ctx):
     assert s["version"]["short"] == h["version"]
     assert s["egress"]["mybank.me"]["asn"] == 55836
     assert s["otp_channels"]["mybank"]["channel"] == "chat"
+
+
+def test_cli_preflight_json(ctx, monkeypatch):
+    from typer.testing import CliRunner
+
+    import friday.cli as cli_mod
+
+    make_ready(ctx, egress=GCP)
+    monkeypatch.setattr(cli_mod, "_ctx", lambda: ctx)
+    r = CliRunner().invoke(cli_mod.app, ["preflight", "mybank.me", "--json"])
+    assert r.exit_code == 1
+    out = json.loads(r.output.strip().splitlines()[-1])
+    assert out["egress"]["asn"] == 396982 and [i["name"] for i in out["items"] if not i["ok"]] == ["egress"]
+    r = CliRunner().invoke(cli_mod.app, ["preflight", "mybank.me", "--override"])
+    assert r.exit_code == 0 and "Override granted" in r.output

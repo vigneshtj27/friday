@@ -198,10 +198,14 @@ def preflight_cmd(
     override: Annotated[bool, typer.Option("--override", help="allow ONE sign-in attempt in the next 30 min despite failures")] = False,
     fresh: Annotated[bool, typer.Option("--fresh", help="look up the egress again (ignore the 15-min cache)")] = False,
     google: Annotated[bool, typer.Option("--google", help="also require Google (for 'populate the sheet' requests)")] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="print the report as JSON (for deploy/egress.sh)")] = False,
 ):
     """Check a profile's sign-in prerequisites (driver, proxy, egress, identity pin, OTP, Google)."""
     ctx = _ctx()
     rep = asyncio.run(ctx.preflight.check(profile_id, need_google=google, fresh=fresh))
+    if as_json:
+        typer.echo(json.dumps({**rep.public(), "egress": ctx.prefs.get(f"egress:{profile_id}")}))
+        raise typer.Exit(0 if rep.ok else 1)
     for line in rep.lines():
         typer.echo(line)
     if override:

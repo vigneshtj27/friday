@@ -169,8 +169,23 @@ def rank_causes(report: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
     if report.get("previous_rejections"):
         ev("bad_credentials", 2, "credentials were explicitly rejected before")
 
-    # Experiments isolate one variable each.
+    # Experiments isolate one variable each. A manual sign-in only separates "automation signature"
+    # from "IP/account/site" when the browser itself doesn't carry the automation flag: under plain
+    # Playwright (or a pin with navigator.webdriver = true) the human drives the same flagged browser.
+    env = report.get("environment") or {}
+    confounded = bool(env) and (env.get("driver") != "patchright" or env.get("pinned_webdriver") is True)
     m = worked("manual")
+    if confounded and "manual" in exps:
+        exps["manual"]["verdict"] = "INCONCLUSIVE"
+        for k in ("automation_fingerprint", "ip_reputation"):
+            causes[k]["evidence"].append(
+                f"manual sign-in ({exps['manual'].get('result_state')}) is INCONCLUSIVE: the remote-view browser ran under "
+                f"{env.get('driver')} with navigator.webdriver {'true' if env.get('pinned_webdriver') else 'unknown'}, "
+                "so it can't separate automation signature from IP"
+            )
+        m = None
+    if env.get("egress", {}).get("datacenter"):
+        ev("ip_reputation", 1, f"egress {env['egress'].get('ip')} is a datacenter network ({env['egress'].get('org')})")
     if m is True:
         ev("automation_fingerprint", 4, "manual login in the same profile works while the agent's does not")
         causes["automation_fingerprint"]["confirmed"] = True
@@ -207,6 +222,13 @@ def rank_causes(report: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
             c["note"] = "unconfirmed: not isolated by an experiment"
     ranked = [c for c in ranked if c["score"] > 0] or ranked[:1]
 
+    if confounded:
+        pid = report.get("profile_id") or "<profile>"
+        return ranked, (
+            f"Fix the prerequisites first: run `deploy/gcp/deploy.sh cli preflight {pid}` (patchright driver, home egress, re-pin). "
+            "Under the current driver/pin a manual sign-in through the remote view is INCONCLUSIVE; after a patchright "
+            "re-pin it discriminates automation signature vs IP."
+        )
     order = ["manual", "fresh", "no_proxy", "alt_proxy", "headless", "chromium"]
     done = set(exps) | {e["name"] for e in report.get("experiments") or [] if e.get("status") == "skipped"}
     nxt = next((n for n in order if n not in done), None)
@@ -249,6 +271,7 @@ class Diagnoser:
             "profile_status": profile.status,
             "previous_rejections": rejections,
             "created_at": iso(),
+            "environment": self.environment(profile),
             **data,
             "experiments": data.get("experiments", []),
         }
@@ -259,6 +282,19 @@ class Diagnoser:
         )
         self.audit.record("diagnosis.create", target=profile_id, report=rid, trigger=trigger_state)
         return rid
+
+    def environment(self, profile: Any) -> dict[str, Any]:
+        """What the site saw from us: driver, the pinned automation flag, and the egress (from the last preflight)."""
+        fp = profile.fingerprint or {}
+        row = self.db.query_one("SELECT value_json FROM prefs WHERE key = ?", (f"egress:{profile.id}",))
+        eg = json.loads(row["value_json"]) if row else {}
+        return {
+            "driver": self.profiles.effective_driver(profile.config),
+            "pinned_driver": fp.get("driver"),
+            "pinned_webdriver": fp.get("webdriver"),
+            "proxy": profile.config.proxy.server if profile.config.proxy else None,
+            "egress": {k: eg.get(k) for k in ("ip", "org", "asn", "country", "datacenter", "checked_at") if k in eg},
+        }
 
     def get(self, report_id: str) -> dict[str, Any] | None:
         r = self.db.query_one("SELECT report_json FROM diagnosis_reports WHERE id = ?", (report_id,))
