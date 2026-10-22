@@ -265,6 +265,22 @@ MIGRATIONS: list[str] = [
         completed_at TEXT
     );
     """,
+    """
+    -- Pause/resume and watch (on_change) support for schedules.
+    ALTER TABLE schedules ADD COLUMN paused_at TEXT;
+    ALTER TABLE schedules ADD COLUMN notify TEXT NOT NULL DEFAULT 'always';
+    -- Per-watch state: the last canonical value seen, and when it was last checked/changed. A watch
+    -- stays quiet unless the value changes; this lets schedule_list show a silent watch is alive.
+    -- last_value is already redacted by watch_report before it gets here; no secrets are stored.
+    CREATE TABLE schedule_state (
+        schedule_id TEXT PRIMARY KEY,
+        last_value TEXT,
+        last_summary TEXT,
+        last_error TEXT,
+        last_checked_at TEXT,
+        last_changed_at TEXT
+    );
+    """,
 ]
 
 

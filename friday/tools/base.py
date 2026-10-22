@@ -53,6 +53,8 @@ class Call:
     plan_id: str | None = None
     progress: Callable[[str], Awaitable[None]] | None = None
     trusted_targets: set[str] = field(default_factory=set)  # ids/names the owner or memory named
+    origin: str = "owner"  # "owner" | "schedule:<id>"
+    watch_id: str | None = None  # the schedule id, only while running an on_change watch job
 
     async def say(self, text: str) -> None:
         if self.progress:

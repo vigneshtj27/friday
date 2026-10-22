@@ -123,14 +123,19 @@ class Scheduler:
         self.poll = poll_seconds
         self._task: asyncio.Task[None] | None = None
         self._jobs: set[asyncio.Task[None]] = set()
+        self._pending_watch: dict[str, dict[str, Any]] = {}  # sid -> watch_report staged this run
+        self._outcomes: dict[str, dict[str, Any]] = {}  # sid -> planner outcome this run
 
     @property
     def tz(self) -> str:
         return self.ctx.settings.default_timezone or "UTC"
 
-    def create(self, kind: str, text: str, when: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    def create(self, kind: str, text: str, when: dict[str, Any], *, notify: str = "always",
+               now: datetime | None = None) -> dict[str, Any]:  # fmt: skip
         if kind not in ("reminder", "job"):
             raise ScheduleError("kind is reminder or job")
+        if notify not in ("always", "on_change"):
+            raise ScheduleError("notify is always or on_change")
         text = " ".join(text.split())[:1000]
         if not text:
             raise ScheduleError("what should it say or do?")
@@ -139,47 +144,112 @@ class Scheduler:
         due = next_run(spec, self.tz, after=now, created=now)
         if due is None or due <= now - timedelta(seconds=5):
             raise ScheduleError("that time is in the past")
+        # A watch (on_change) only makes sense for a recurring job that checks something repeatedly.
+        if notify == "on_change" and (kind != "job" or not spec.get("every")):
+            raise ScheduleError("on_change is only for a recurring job (every ...)")
         sid = secrets.token_hex(4)
         self.ctx.db.execute(
-            "INSERT INTO schedules (id, kind, text, spec_json, tz, next_run_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (sid, kind, self.ctx.redactor.redact(text), json.dumps(spec), self.tz, iso(due), iso(now)),
+            "INSERT INTO schedules (id, kind, text, spec_json, tz, next_run_at, created_at, notify) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (sid, kind, self.ctx.redactor.redact(text), json.dumps(spec), self.tz, iso(due), iso(now), notify),
         )
-        self.ctx.audit.record("schedule.create", actor="owner", target=sid, kind=kind, when=describe(spec))
+        self.ctx.audit.record("schedule.create", actor="owner", target=sid, kind=kind, when=describe(spec), notify=notify)
         return self.get(sid)  # type: ignore[return-value]
 
     def get(self, sid: str) -> dict[str, Any] | None:
         r = self.ctx.db.query_one("SELECT * FROM schedules WHERE id = ?", (sid,))
         return self._public(dict(r)) if r else None
 
+    def _fmt_local(self, ts: str | None, tz: str) -> str | None:
+        return datetime.fromisoformat(ts).astimezone(ZoneInfo(tz)).strftime("%a %d %b %H:%M") if ts else None
+
     def _public(self, r: dict[str, Any]) -> dict[str, Any]:
         spec = json.loads(r["spec_json"])
         nxt = r["next_run_at"]
-        local = datetime.fromisoformat(nxt).astimezone(ZoneInfo(r["tz"])).strftime("%a %d %b %H:%M") if nxt else None
-        return {"id": r["id"], "kind": r["kind"], "text": r["text"], "when": describe(spec), "next": local,
-                "runs": r["runs"], "active": r["cancelled_at"] is None and nxt is not None}  # fmt: skip
+        paused = r["paused_at"] is not None and r["cancelled_at"] is None
+        out = {"id": r["id"], "kind": r["kind"], "text": r["text"], "when": describe(spec),
+               "next": None if paused else self._fmt_local(nxt, r["tz"]), "runs": r["runs"],
+               "notify": r.get("notify", "always"), "paused": paused,
+               "active": r["cancelled_at"] is None and nxt is not None and not paused}  # fmt: skip
+        if r.get("notify") == "on_change":
+            st = self.ctx.db.query_one("SELECT * FROM schedule_state WHERE schedule_id = ?", (r["id"],))
+            out["last_checked"] = self._fmt_local(st["last_checked_at"], r["tz"]) if st else None
+            out["last_changed"] = self._fmt_local(st["last_changed_at"], r["tz"]) if st else None
+        return out
 
     def list(self, *, include_done: bool = False) -> list[dict[str, Any]]:
         rows = self.ctx.db.query("SELECT * FROM schedules ORDER BY next_run_at IS NULL, next_run_at")
         out = [self._public(dict(r)) for r in rows]
-        return out if include_done else [s for s in out if s["active"]]
+        return out if include_done else [s for s in out if s["active"] or s["paused"]]
+
+    def _match(self, query: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        q = query.strip().lower()
+        return [s for s in candidates if s["id"] == q] or [s for s in candidates if q and all(w in s["text"].lower() for w in q.split())]
 
     def cancel(self, query: str) -> list[dict[str, Any]]:
-        """Cancel by id, or every active schedule whose text contains the words."""
-        active = self.list()
-        q = query.strip().lower()
-        hits = [s for s in active if s["id"] == q] or [s for s in active if q and all(w in s["text"].lower() for w in q.split())]
+        """Cancel by id, or every active/paused schedule whose text contains the words."""
+        hits = self._match(query, self.list())
         for s in hits:
             self.ctx.db.execute("UPDATE schedules SET cancelled_at = ?, next_run_at = NULL WHERE id = ?", (iso(), s["id"]))
             self.ctx.audit.record("schedule.cancel", actor="owner", target=s["id"])
         return hits
+
+    def pause(self, query: str) -> list[dict[str, Any]]:
+        """Stop future fires but keep the spec. A mid-run job already firing is not interrupted."""
+        hits = self._match(query, [s for s in self.list() if not s["paused"]])
+        for s in hits:
+            self.ctx.db.execute("UPDATE schedules SET paused_at = ? WHERE id = ? AND cancelled_at IS NULL", (iso(), s["id"]))
+            self.ctx.audit.record("schedule.pause", actor="owner", target=s["id"])
+        return [self.get(s["id"]) for s in hits]  # type: ignore[misc]
+
+    def resume(self, query: str, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        """Resume a paused schedule, recomputing next_run_at from now so no missed slots back-fire."""
+        now = now or datetime.now(timezone.utc)
+        paused = [s for s in self.list() if s["paused"]]
+        hits = self._match(query, paused)
+        for s in hits:
+            r = self.ctx.db.query_one("SELECT * FROM schedules WHERE id = ?", (s["id"],))
+            spec = json.loads(r["spec_json"])
+            nxt = next_run(spec, r["tz"], after=now, created=now if ("in_minutes" in spec or "at" in spec) else None)
+            self.ctx.db.execute("UPDATE schedules SET paused_at = NULL, next_run_at = ? WHERE id = ?",
+                                (iso(nxt) if nxt else None, s["id"]))  # fmt: skip
+            self.ctx.audit.record("schedule.resume", actor="owner", target=s["id"])
+        return [self.get(s["id"]) for s in hits]  # type: ignore[misc]
+
+    def run_now(self, query: str) -> list[dict[str, Any]]:
+        """Run a schedule's job immediately, out of band, without touching its next scheduled fire."""
+        rows = self.ctx.db.query("SELECT * FROM schedules WHERE cancelled_at IS NULL")
+        cands = [self._public(dict(r)) for r in rows]
+        hits = [s for s in self._match(query, cands) if s["kind"] == "job"]
+        for s in hits:
+            r = self.ctx.db.query_one("SELECT * FROM schedules WHERE id = ?", (s["id"],))
+            self.ctx.audit.record("schedule.run_now", actor="owner", target=s["id"])
+            task = asyncio.create_task(self._run_job(s["id"], r["text"], notify=r["notify"]))
+            self._jobs.add(task)
+            task.add_done_callback(self._jobs.discard)
+        return hits
+
+    # ---- watch state ----------------------------------------------------------------------
+
+    def _state(self, sid: str) -> dict[str, Any] | None:
+        r = self.ctx.db.query_one("SELECT * FROM schedule_state WHERE schedule_id = ?", (sid,))
+        return dict(r) if r else None
+
+    def record_watch(self, sid: str, value: str, summary: str, changed: bool) -> None:
+        """Staged by watch_report during a run; the scheduler applies it after the run finishes."""
+        self._pending_watch[sid] = {"value": value, "summary": summary, "changed": changed}
+
+    def note_outcome(self, sid: str, *, status: str, stopped_by_approval: bool) -> None:
+        """Called by the planner when a scheduled plan ends, so the scheduler can react to it."""
+        self._outcomes[sid] = {"status": status, "stopped_by_approval": stopped_by_approval}
 
     # ---- firing ---------------------------------------------------------------------------
 
     async def tick(self, now: datetime | None = None) -> list[str]:
         """Fire everything due. Returns the ids fired."""
         now = now or datetime.now(timezone.utc)
-        due = self.ctx.db.query("SELECT * FROM schedules WHERE cancelled_at IS NULL AND next_run_at IS NOT NULL AND next_run_at <= ?",
-                                (iso(now),))  # fmt: skip
+        due = self.ctx.db.query(
+            "SELECT * FROM schedules WHERE cancelled_at IS NULL AND paused_at IS NULL AND next_run_at IS NOT NULL AND next_run_at <= ?",
+            (iso(now),))  # fmt: skip
         fired = []
         for r in due:
             spec = json.loads(r["spec_json"])
@@ -190,23 +260,99 @@ class Scheduler:
             if r["kind"] == "reminder":
                 await self.ctx.notifier.send(f"Reminder: {r['text']}", None)
             else:
-                task = asyncio.create_task(self._run_job(r["id"], r["text"]))
+                task = asyncio.create_task(self._run_job(r["id"], r["text"], notify=r["notify"]))
                 self._jobs.add(task)
                 task.add_done_callback(self._jobs.discard)
         return fired
 
-    async def _run_job(self, sid: str, request: str) -> None:
+    async def _run_job(self, sid: str, request: str, *, notify: str = "always") -> None:
         chat = self.ctx.chat
-        await self.ctx.notifier.send(f"Scheduled job: {request}", None)
+        on_change = notify == "on_change"
+        if not on_change:  # a watch stays quiet unless something changed, so no "running" preamble
+            await self.ctx.notifier.send(f"Scheduled job: {request}", None)
         if chat.assistant is None:
             chat.store.add("friday", "I couldn't run that: the model isn't configured.")
             return
+        self._pending_watch.pop(sid, None)
+        self._outcomes.pop(sid, None)
         try:
-            reply = await chat.assistant.reply(request, origin=f"schedule:{sid}")
+            reply = await chat.assistant.reply(request, origin=f"schedule:{sid}", schedule_id=sid,
+                                               watch_id=sid if on_change else None)  # fmt: skip
         except Exception as e:
             log.warning("scheduled job %s failed: %s", sid, type(e).__name__)
             reply = f"The scheduled job didn't run: {type(e).__name__}."
+            if on_change:
+                await self._watch_error(sid, reply)
+            else:
+                chat.store.add("friday", reply)
+                await self._notify_reply(reply)
+            return
+        outcome = self._outcomes.pop(sid, {"status": "done", "stopped_by_approval": False})
+        if outcome.get("stopped_by_approval"):
+            # An approval expired or was denied while the owner was away: say exactly what didn't
+            # happen and offer a one-tap re-run. (The approval card itself already pinged the notifier.)
+            msg = f"{reply}\nSay `run {sid}` to do it now."
+            chat.store.add("friday", msg)
+            await self._notify_reply(msg)
+            return
+        if on_change:
+            await self._apply_watch(sid, reply, failed=outcome.get("status") not in ("done", None))
+            return
         chat.store.add("friday", reply)
+        await self._notify_reply(reply)
+
+    async def _notify_reply(self, reply: str) -> None:
+        """Deliver a scheduled job's final reply to the external channels (Telegram etc.), redacted
+        and capped. The full reply is already in the chat, so the built-in chat channel is skipped
+        to avoid a duplicate."""
+        text = self.ctx.redactor.redact(reply)[:1500]
+        channels = getattr(self.ctx.notifier, "notifiers", [self.ctx.notifier])
+        for n in channels:
+            if getattr(n, "name", "") == "chat":
+                continue
+            try:
+                await n.send(text, None)
+            except Exception:
+                log.warning("notifier %s failed on a scheduled reply", getattr(n, "name", "?"))
+
+    def _upsert_state(self, sid: str, **cols: Any) -> None:
+        if self._state(sid) is None:
+            keys = ["schedule_id", *cols]
+            self.ctx.db.execute(f"INSERT INTO schedule_state ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
+                                (sid, *cols.values()))  # fmt: skip
+        else:
+            self.ctx.db.execute(f"UPDATE schedule_state SET {', '.join(f'{k} = ?' for k in cols)} WHERE schedule_id = ?",
+                                (*cols.values(), sid))  # fmt: skip
+
+    async def _apply_watch(self, sid: str, reply: str, *, failed: bool) -> None:
+        """After an on_change run: update last-checked always; post only when the value changed."""
+        now = iso()
+        pending = self._pending_watch.pop(sid, None)
+        if failed and pending is None:
+            await self._watch_error(sid, reply)
+            return
+        self._upsert_state(sid, last_checked_at=now, last_error=None)
+        if pending is None:
+            # The run finished without calling watch_report: treat as no change, say nothing.
+            log.info("watch %s: no watch_report; treated as no change", sid)
+            return
+        if pending["changed"]:
+            self._upsert_state(sid, last_value=self.ctx.redactor.redact(pending["value"]),
+                               last_summary=self.ctx.redactor.redact(pending["summary"]), last_changed_at=now)  # fmt: skip
+            self.ctx.chat.store.add("friday", pending["summary"])
+            await self._notify_reply(pending["summary"])
+
+    async def _watch_error(self, sid: str, reply: str) -> None:
+        """Post a watch's failure once; suppress an identical repeat on the next fire."""
+        text = self.ctx.redactor.redact(reply)
+        st = self._state(sid)
+        self._upsert_state(sid, last_checked_at=iso())
+        if st and st.get("last_error") == text:
+            log.info("watch %s: same error as last time; suppressed", sid)
+            return
+        self._upsert_state(sid, last_error=text)
+        self.ctx.chat.store.add("friday", reply)
+        await self._notify_reply(reply)
 
     async def _loop(self) -> None:
         while True:
