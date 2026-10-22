@@ -344,28 +344,85 @@ def verify(
     }
 
 
+def _norm_desc(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
+
+def _desc_overlap(a: str, b: str) -> bool:
+    """A loose same-charge test: one normalized description contains the other's leading token(s).
+    Bank descriptors and emailed merchant names rarely match exactly, so we compare on overlap."""
+    na, nb = _norm_desc(a), _norm_desc(b)
+    if not na or not nb:
+        return False
+    short, long = sorted((na, nb), key=len)
+    return short in long or long.split()[0] == short.split()[0]
+
+
 class TransactionStore:
     def __init__(self, db: Database):
         self._db = db
 
     def add(self, txns: list[Transaction]) -> tuple[int, int]:
+        """Add bank-confirmed rows (status='bank'), then reconcile any email-evidence rows they match."""
         new = 0
         with self._db.tx() as c:
             for h, t in with_hashes(txns):
                 cur = c.execute(
-                    "INSERT OR IGNORE INTO transactions (hash, source, date, description, amount, currency, direction, balance, raw_ref, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR IGNORE INTO transactions (hash, source, date, description, amount, currency, direction, balance, raw_ref, created_at, status)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'bank')",
                     (h, t.source, t.date.isoformat(), t.description, str(t.amount), t.currency, t.direction,
                      str(t.balance) if t.balance is not None else None, t.raw_ref, iso()),
                 )  # fmt: skip
                 new += cur.rowcount
+                if cur.rowcount:
+                    self._reconcile(c, t)
         return new, len(txns) - new
 
-    def list(self, *, source: str | None = None, start: str | None = None, end: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+    def _reconcile(self, c: Any, t: Transaction) -> None:
+        """A bank row just landed: mark any matching email-evidence row 'confirmed' so exports
+        never double-write the same charge."""
+        for r in c.execute(
+            "SELECT hash, description FROM transactions WHERE status = 'email' AND date = ? AND amount = ?",
+            (t.date.isoformat(), str(t.amount)),
+        ).fetchall():
+            if _desc_overlap(t.description, r["description"]):
+                c.execute("UPDATE transactions SET status = 'confirmed' WHERE hash = ?", (r["hash"],))
+
+    def add_evidence(self, items: list[Transaction], *, evidence_refs: list[str]) -> dict[str, int]:
+        """Store email-evidence rows (status='email'). Skips a row when a bank-confirmed charge with
+        the same date/amount/normalized-description already exists (that charge is already real)."""
+        new = skipped_dup = skipped_confirmed = 0
+        with self._db.tx() as c:
+            for (h, t), ref in zip(with_hashes(items), evidence_refs, strict=True):
+                already = c.execute(
+                    "SELECT description FROM transactions WHERE status IN ('bank','confirmed') AND date = ? AND amount = ?",
+                    (t.date.isoformat(), str(t.amount)),
+                ).fetchall()
+                if any(_desc_overlap(t.description, r["description"]) for r in already):
+                    skipped_confirmed += 1
+                    continue
+                cur = c.execute(
+                    "INSERT OR IGNORE INTO transactions (hash, source, date, description, amount, currency, direction, balance, raw_ref, created_at, status, evidence_ref)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'email', ?)",
+                    (h, t.source, t.date.isoformat(), t.description, str(t.amount), t.currency, t.direction,
+                     str(t.balance) if t.balance is not None else None, t.raw_ref, iso(), ref),
+                )  # fmt: skip
+                new += cur.rowcount
+                skipped_dup += 1 - cur.rowcount
+        return {"new": new, "already_known": skipped_dup, "already_confirmed": skipped_confirmed}
+
+    def list(self, *, source: str | None = None, sources: list[str] | None = None, status: str | None = None,
+             start: str | None = None, end: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:  # fmt: skip
         sql, params = "SELECT * FROM transactions WHERE 1=1", []
         if source:
             sql += " AND source = ?"
             params.append(source)
+        if sources:
+            sql += f" AND source IN ({','.join('?' * len(sources))})"
+            params.extend(sources)
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
         if start:
             sql += " AND date >= ?"
             params.append(start)

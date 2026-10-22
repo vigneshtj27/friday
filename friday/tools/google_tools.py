@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from friday.sheets import (
@@ -259,7 +260,111 @@ class SheetsSetExpenseSheet(Tool):
         return {"saved": target, "title": title, "columns": {str(values[h][i]): f for i, f in mapping.items()}}
 
 
-# ---- Gmail ------------------------------------------------------------------------------------
+# ---- Email-evidence expenses (read-only Gmail; login-free) ------------------------------------
+
+
+def _gmail_date(d: str) -> str:
+    return date.fromisoformat(d).strftime("%Y/%m/%d")
+
+
+class GmailScanExpenses(Tool):
+    name = "gmail_scan_expenses"
+    description = ("Read-only scan of the owner's Gmail for expense EVIDENCE for one account (card OTP/SafeKey, bank "
+                   "transaction alerts, order confirmations) in a date range, parsed in code. Stores the evidence and "
+                   "returns counts and the parsed rows. No portal login; these are unverified until a bank fetch confirms them.")
+    schema = {"type": "object", "properties": {"account": {"type": "string"}, "start": DATE, "end": DATE},
+              "required": ["account", "start", "end"]}  # fmt: skip
+    untrusted_output = True
+
+    def available(self, ctx: Any) -> bool:
+        return True
+
+    async def run(self, args: dict[str, Any], call: Call) -> Any:
+        from friday.capabilities.mail_evidence import DEFAULT_EVIDENCE_SENDERS, ParsedEmail, parse_messages, to_transaction
+
+        ctx = call.ctx
+        if not (ctx.google and ctx.google.can("gmail.read")):
+            raise ToolError("Gmail isn't connected. Connect it read-only: call google_connect with purpose 'gmail' "
+                            "(gmail.readonly is enough for email evidence; the workspace grant is not needed).")  # fmt: skip
+        profile = ctx.chat.assistant._profile(args["account"]) if ctx.chat.assistant else ctx.profiles.get(args["account"])
+        site = ctx.sites.get(profile.site_id)
+        senders = list(dict.fromkeys(
+            [*(site.otp_senders if site else []), *(ctx.prefs.get(f"mail_evidence_senders:{profile.site_id}") or []), *DEFAULT_EVIDENCE_SENDERS]
+        ))
+        start, end = args["start"], args["end"]
+        query = f"after:{_gmail_date(start)} before:{_gmail_date(end)} from:({' OR '.join(senders)})"
+        await call.say(f"Scanning Gmail (read-only) for {profile.id} expense evidence, {start}..{end}")
+        raw = await ctx.workspace.gmail.scan(query, limit=100)
+        emails = [ParsedEmail(sender=m["from"], subject=m["subject"], body=m["body"], message_id=m["id"],
+                              default_currency=ctx.settings.default_currency) for m in raw]  # fmt: skip
+        items, unparsed = parse_messages(emails)
+        source = f"gmail:{profile.site_id}"
+        txns = [to_transaction(i, source=source, fallback_date=date.fromisoformat(start)) for i in items]
+        res = ctx.transactions.add_evidence(txns, evidence_refs=[i.message_id for i in items])
+        ctx.audit.record("mail.scan_expenses", actor="assistant", target=profile.id, scanned=len(raw),
+                         found=len(items), new=res["new"], unparsed=unparsed)  # fmt: skip
+        return {
+            "account": profile.id, "scanned": len(raw), "found": len(items),
+            "new": res["new"], "already_known": res["already_known"] + res["already_confirmed"], "unparsed": unparsed,
+            "rows": [{"merchant": i.merchant, "amount": str(i.amount), "currency": i.currency,
+                      "date": i.date.isoformat() if i.date else None, "kind": i.kind} for i in items],
+            "note": "email evidence, not statement data: each row is unverified until a bank fetch confirms it",
+        }
+
+
+class SheetsAddEvidence(Tool):
+    name = "sheets_add_evidence"
+    description = ("Append stored EMAIL-EVIDENCE rows for an account and range to the expense sheet, each marked PENDING "
+                   "(Status column, or a ' (PENDING)' suffix). Defaults to the saved expense sheet. Always asks for your "
+                   "approval first, because these are unverified. Reads back to verify. Run gmail_scan_expenses first.")
+    schema = {"type": "object", "properties": {
+        "account": {"type": "string"}, "start": DATE, "end": DATE, "spreadsheet": SID, "tab": {"type": "string"},
+    }, "required": ["account", "start", "end"]}  # fmt: skip
+    effect = "write"
+
+    def _profile(self, call: Call, account: str) -> Any:
+        return call.ctx.chat.assistant._profile(account) if call.ctx.chat.assistant else call.ctx.profiles.get(account)
+
+    def _target(self, args: dict[str, Any], call: Call) -> dict[str, Any]:
+        saved = call.ctx.prefs.get("expense_sheet") or {}
+        if args.get("spreadsheet"):
+            return {"spreadsheet": _sid(args), "tab": args.get("tab") or saved.get("tab")}
+        if not saved:
+            raise ToolError("no expense sheet saved yet: find it with sheets_list and save it with sheets_set_expense_sheet")
+        return {"spreadsheet": saved["spreadsheet"], "tab": args.get("tab") or saved.get("tab")}
+
+    def _sources(self, call: Call, account: str) -> list[str]:
+        return [f"gmail:{self._profile(call, account).site_id}", "gmail:unknown"]
+
+    async def precheck(self, args: dict[str, Any], call: Call) -> str | None:
+        # Always approval-gated: adding unverified email evidence to the sheet is the owner's call each time.
+        ctx = call.ctx
+        rows = ctx.transactions.list(sources=self._sources(call, args["account"]), status="email",
+                                     start=args["start"], end=args["end"], limit=20000)  # fmt: skip
+        total = sum(Decimal(r["amount"]) for r in rows if r["direction"] == "debit")
+        t = self._target(args, call)
+        return (f"Add {len(rows)} UNVERIFIED email-evidence row(s) (total {total} in charges) to '{t.get('tab')}', "
+                "each marked PENDING. These are from emails, not a statement.")
+
+    async def run(self, args: dict[str, Any], call: Call) -> Any:
+        t = self._target(args, call)
+        if not t.get("tab"):
+            raise ToolError("which tab? pass tab, or save an expense sheet first")
+        profile = self._profile(call, args["account"])
+        await call.say(f"Adding {profile.id} email evidence to '{t['tab']}' (marked PENDING)")
+        v = await export_transactions(
+            call.ctx, spreadsheet=t["spreadsheet"], tab=t["tab"], account=profile.id,
+            start=date.fromisoformat(args["start"]), end=date.fromisoformat(args["end"]),
+            status="email", sources=self._sources(call, args["account"]),
+            source_label=f"{call.ctx.sites.get(profile.site_id).name if call.ctx.sites.get(profile.site_id) else profile.id} (email, unverified)",
+            pending=True,
+        )  # fmt: skip
+        if v["ok"]:
+            v["verified"] = [
+                f"read back all {v['appended']} PENDING evidence row(s) in '{t['tab']}' ({v['rows_before']} -> {v['rows_after']} rows)",
+            ]
+        v["note"] = "these rows are email evidence marked PENDING, not statement-confirmed transactions"
+        return v
 
 
 class GmailSearch(Tool):
@@ -382,5 +487,5 @@ class DriveShare(Tool):
 
 
 TOOLS = [SheetsList(), SheetsRead(), SheetsAppendRows(), SheetsRemoveAppended(), SheetsCreateTab(), SheetsAddTransactions(),
-         SheetsSetExpenseSheet(), GmailSearch(), GmailRead(), GmailDraft(), GmailSend(), DriveSearch(), DriveDownload(),
-         DriveUpload(), DriveShare()]  # fmt: skip
+         SheetsSetExpenseSheet(), GmailScanExpenses(), SheetsAddEvidence(), GmailSearch(), GmailRead(), GmailDraft(),
+         GmailSend(), DriveSearch(), DriveDownload(), DriveUpload(), DriveShare()]  # fmt: skip

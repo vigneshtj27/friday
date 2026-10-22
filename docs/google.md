@@ -4,7 +4,7 @@ friday uses two separate Google grants, each with only what it needs:
 
 | Grant | Scopes | Used for |
 |---|---|---|
-| Gmail | `gmail.readonly` | Reading emailed one-time codes (matched by the site's OTP senders, after the sign-in submitted) |
+| Gmail | `gmail.readonly` | Reading emailed one-time codes (matched by the site's OTP senders, after the sign-in submitted), and **expense evidence** from bank/card/merchant emails ("get my expenses from email"). Read-only: friday never sends, drafts, labels or deletes mail for either. |
 | Sheets | `spreadsheets`, `drive.metadata.readonly` | Listing your spreadsheets, reading a tab, appending rows |
 
 Refresh tokens are stored encrypted in the vault under `system/google/…` (Gmail keeps its older name `system/gmail/refresh-token`). `system` is a reserved site id, so no account profile can reach them: the injector can't type one into a page, and they never enter the model's context.

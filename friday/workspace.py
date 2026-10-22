@@ -63,6 +63,18 @@ class Gmail:
                         "snippet": full.get("snippet", "")})  # fmt: skip
         return out
 
+    async def scan(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Read-only (gmail.read): full messages for a query, with plain-text bodies, for evidence
+        parsing. Bodies are returned to the caller to parse in code; never sent to the model."""
+        data = await self.api.req("gmail.read", "GET", f"{GMAIL}/messages", params={"q": query, "maxResults": min(limit, 100)})
+        out = []
+        for m in data.get("messages", [])[:limit]:
+            full = await self.api.req("gmail.read", "GET", f"{GMAIL}/messages/{m['id']}", params={"format": "full"})
+            out.append({"id": m["id"], "thread_id": full.get("threadId"), "from": _header(full, "From"),
+                        "subject": _header(full, "Subject"), "date": _header(full, "Date"),
+                        "internal_date": int(full.get("internalDate", 0)), "body": message_text(full)})  # fmt: skip
+        return out
+
     async def read_thread(self, thread_id: str, max_chars: int = 12000) -> dict[str, Any]:
         data = await self.api.req("gmail.read", "GET", f"{GMAIL}/threads/{thread_id}", params={"format": "full"})
         msgs = []

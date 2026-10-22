@@ -241,6 +241,13 @@ MIGRATIONS: list[str] = [
         cancelled_at TEXT
     );
     """,
+    """
+    -- Email-evidence expenses: 'bank' = confirmed from a statement/activity fetch (existing rows),
+    -- 'email' = parsed from a bank/card/merchant email (unverified, exported as PENDING),
+    -- 'confirmed' = an email row a later bank fetch matched (reconciled; not re-exported).
+    ALTER TABLE transactions ADD COLUMN status TEXT NOT NULL DEFAULT 'bank';
+    ALTER TABLE transactions ADD COLUMN evidence_ref TEXT;
+    """,
 ]
 
 

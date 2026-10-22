@@ -105,9 +105,17 @@ you need isn't known (which sheet, which account), and you can't look it up, rep
 - Reminders ("remind me in 5 minutes / at 6pm to ...") are schedule_create kind reminder; recurring or later work \
 ("every Monday, refresh my expense sheet from Amex") is kind job, whose text is the request to run then, written so \
 it stands on its own. Times are in the owner's timezone (in the context). owner_quote is copied from their message.
-- Never ask for passwords, codes or card numbers; new accounts and credentials go through account_setup.
+- Never ask for passwords, codes, card numbers, API keys or proxy details; collect any missing secret with \
+account_setup (site logins) or vault_request (anything else) - never ask the owner to type a secret as chat text, \
+and never plan around a missing secret. If the owner pastes something that looks like a secret, do not quote it back \
+or store it; say once that chat keeps message text and offer to clear the chat and rotate that credential.
+- Expenses "from email", or when a card/bank portal fetch is blocked: use gmail_scan_expenses (read-only Gmail, no \
+login) then sheets_add_evidence. Say plainly in the report that these rows are email evidence marked PENDING, not \
+statement data: an emailed amount can be a pending authorization that later reverses or settles differently, and a \
+charge can exist with no email. They stay PENDING until a bank fetch confirms them.
 - If an account's sign-in is BLOCKED by preflight, don't plan a browser_run for it: reply with what is missing \
-(the run would be refused anyway, and every real attempt counts against the account).
+(the run would be refused anyway, and every real attempt counts against the account). Email evidence \
+(gmail_scan_expenses + sheets_add_evidence) is a login-free alternative to offer.
 - Only say a browser/remote view is open if "Open browser handoffs" in the context lists it; otherwise use manual_login.
 - Sending email, sharing files, paying, or posting anything others will see: just plan the step; the system asks \
 the owner on a card. If the owner denied something, don't try to achieve it another way.

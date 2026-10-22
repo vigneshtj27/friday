@@ -117,8 +117,22 @@ class FakeGoogle:
         # ---- Gmail
         if path == "/gmail/v1/users/me/messages":
             q = request.url.params.get("q", "").lower()
-            words = [w for w in re.findall(r"[a-z0-9]+", q.replace("from:", " ").replace("subject:", " ")) if len(w) > 2]
-            hits = [x for x in self.mail if all(w in (x["from"] + x["subject"] + x["body"]).lower() for w in words)]
+            # from:(a OR b) -> match any of those senders; after:/before:/newer_than: are ignored
+            # (tests control the mail set); remaining free words must all appear.
+            senders: list[str] = []
+            fm = re.search(r"from:\(([^)]*)\)|from:(\S+)", q)
+            if fm:
+                senders = re.split(r"\s+or\s+", (fm.group(1) or fm.group(2)))
+            rest = re.sub(r"(from:\([^)]*\)|from:\S+|subject:|after:\S+|before:\S+|newer_than:\S+)", " ", q)
+            words = [w for w in re.findall(r"[a-z0-9]+", rest) if len(w) > 2]
+            hits = []
+            for x in self.mail:
+                frm = x["from"].lower()
+                if senders and not any(s.strip() and s.strip() in frm for s in senders):
+                    continue
+                if not all(w in (x["from"] + x["subject"] + x["body"]).lower() for w in words):
+                    continue
+                hits.append(x)
             return httpx.Response(200, json={"messages": [{"id": x["id"], "threadId": x["threadId"]} for x in hits]})
         m = re.match(r"/gmail/v1/users/me/messages/([^/]+)$", path)
         if m:

@@ -325,25 +325,49 @@ def validate_then(then: dict[str, Any]) -> dict[str, Any]:
                       "include_credits": bool(sheet.get("include_credits")), "column_map": cmap}}  # fmt: skip
 
 
+def _status_column(header: list[str]) -> int | None:
+    for i, h in enumerate(header):
+        if re.fullmatch(r"\s*status\s*", str(h), re.I):
+            return i
+    return None
+
+
 async def export_transactions(
     ctx: Any, *, spreadsheet: str, tab: str, account: str, start: date, end: date,
     include_credits: bool = False, column_map: dict[str, str] | None = None,
+    status: str | None = None, sources: list[str] | None = None, source_label: str | None = None, pending: bool = False,
 ) -> dict[str, Any]:  # fmt: skip
-    """Append the stored transactions of one account and range to a tab, then verify by reading it back."""
+    """Append the stored transactions of one account and range to a tab, then verify by reading it back.
+
+    `status`/`sources` select rows by status (e.g. 'email' evidence) and source; `pending` marks each
+    appended row PENDING (a Status column if the tab has one, else a ' (PENDING)' suffix on the
+    description) and `source_label` overrides the Card/Account value written.
+    """
     sid = spreadsheet_id(spreadsheet)
     profile = ctx.profiles.get(account)
     site = ctx.sites.get(profile.site_id)
     from friday.capabilities.transactions import Transaction
 
-    rows = ctx.transactions.list(source=profile.id, start=start.isoformat(), end=end.isoformat(), limit=20000)
+    if sources is not None:
+        rows = ctx.transactions.list(sources=sources, status=status, start=start.isoformat(), end=end.isoformat(), limit=20000)
+    else:
+        rows = ctx.transactions.list(source=profile.id, status=status, start=start.isoformat(), end=end.isoformat(), limit=20000)
+    before = await ctx.sheets.read(sid, tab)
+    status_col = _status_column([str(c) for c in before[find_header(before)]]) if pending else None
     txns = [
-        Transaction(date.fromisoformat(r["date"]), r["description"], Decimal(r["amount"]), r["currency"], r["direction"],
+        Transaction(date.fromisoformat(r["date"]),
+                    r["description"] + (" (PENDING)" if pending and status_col is None else ""),
+                    Decimal(r["amount"]), r["currency"], r["direction"],
                     Decimal(r["balance"]) if r.get("balance") else None, r["source"], r["raw_ref"])  # fmt: skip
         for r in rows
     ]
-    before = await ctx.sheets.read(sid, tab)
-    plan = plan_append(before, txns, source_label=site.name if site else profile.id, start=start, end=end,
+    label = source_label if source_label is not None else (site.name if site else profile.id)
+    plan = plan_append(before, txns, source_label=label, start=start, end=end,
                        include_credits=include_credits, column_map=column_map)  # fmt: skip
+    if pending and status_col is not None:
+        for row in plan.rows:
+            if status_col < len(row):
+                row[status_col] = "PENDING"
     rows_before = sum(1 for r in before[plan.header_row + 1 :] if any(str(c).strip() for c in r))
     await ctx.sheets.append(sid, tab, plan.rows)
     ctx.audit.record("sheets.append", actor="system", target=sid, tab=tab, rows=len(plan.rows), account=profile.id)
