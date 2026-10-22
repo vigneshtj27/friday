@@ -76,6 +76,19 @@ def normalise(when: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def is_one_shot(spec: dict[str, Any]) -> bool:
+    return "in_minutes" in spec or "at" in spec
+
+
+def one_shot_due(spec: dict[str, Any], tz: str, created: datetime) -> datetime:
+    """The single fixed UTC moment a one-shot was set for (never re-based)."""
+    if "in_minutes" in spec:
+        return created + timedelta(minutes=spec["in_minutes"])
+    z = ZoneInfo(tz)
+    at = datetime.fromisoformat(spec["at"])
+    return _utc(at.replace(tzinfo=z) if at.tzinfo is None else at)
+
+
 def next_run(spec: dict[str, Any], tz: str, *, after: datetime, created: datetime | None = None) -> datetime | None:
     """Next time (UTC) strictly after `after`, or None for a one-shot already past."""
     z = ZoneInfo(tz)
@@ -125,6 +138,7 @@ class Scheduler:
         self._jobs: set[asyncio.Task[None]] = set()
         self._pending_watch: dict[str, dict[str, Any]] = {}  # sid -> watch_report staged this run
         self._outcomes: dict[str, dict[str, Any]] = {}  # sid -> planner outcome this run
+        self._locks: dict[str, asyncio.Lock] = {}  # per-schedule: serialize same-schedule runs
 
     @property
     def tz(self) -> str:
@@ -202,18 +216,32 @@ class Scheduler:
         return [self.get(s["id"]) for s in hits]  # type: ignore[misc]
 
     def resume(self, query: str, *, now: datetime | None = None) -> list[dict[str, Any]]:
-        """Resume a paused schedule, recomputing next_run_at from now so no missed slots back-fire."""
+        """Resume a paused schedule. A recurring job's next run is recomputed from now (no missed
+        slots back-fire). A one-shot keeps its original fixed time: if that time is still in the
+        future it re-arms to it; if it has already passed, it is marked expired and NOT fired - the
+        owner is told to set a new time. A dated commitment is never silently moved or back-fired.
+        """
         now = now or datetime.now(timezone.utc)
-        paused = [s for s in self.list() if s["paused"]]
-        hits = self._match(query, paused)
+        hits = self._match(query, [s for s in self.list() if s["paused"]])
+        out = []
         for s in hits:
             r = self.ctx.db.query_one("SELECT * FROM schedules WHERE id = ?", (s["id"],))
             spec = json.loads(r["spec_json"])
-            nxt = next_run(spec, r["tz"], after=now, created=now if ("in_minutes" in spec or "at" in spec) else None)
+            expired = False
+            if is_one_shot(spec):
+                due = one_shot_due(spec, r["tz"], datetime.fromisoformat(r["created_at"]))
+                nxt = due if due > now else None
+                expired = nxt is None
+            else:
+                nxt = next_run(spec, r["tz"], after=now)
+            # An expired one-shot stays un-scheduled (next_run_at NULL) and un-paused: it will not fire.
             self.ctx.db.execute("UPDATE schedules SET paused_at = NULL, next_run_at = ? WHERE id = ?",
                                 (iso(nxt) if nxt else None, s["id"]))  # fmt: skip
-            self.ctx.audit.record("schedule.resume", actor="owner", target=s["id"])
-        return [self.get(s["id"]) for s in hits]  # type: ignore[misc]
+            self.ctx.audit.record("schedule.resume", actor="owner", target=s["id"], expired=expired)
+            pub = self.get(s["id"])
+            pub["expired"] = expired  # type: ignore[index]
+            out.append(pub)
+        return out  # type: ignore[return-value]
 
     def run_now(self, query: str) -> list[dict[str, Any]]:
         """Run a schedule's job immediately, out of band, without touching its next scheduled fire."""
@@ -265,41 +293,93 @@ class Scheduler:
                 task.add_done_callback(self._jobs.discard)
         return fired
 
+    def _lock_for(self, sid: str) -> asyncio.Lock:
+        return self._locks.setdefault(sid, asyncio.Lock())
+
     async def _run_job(self, sid: str, request: str, *, notify: str = "always") -> None:
+        # Per-schedule serialization covers init, execution and final state application, so a second
+        # run of the same schedule can never clobber state a first run has staged (the global
+        # assistant lock alone is not enough: it is released before state is applied).
+        async with self._lock_for(sid):
+            await self._run_job_locked(sid, request, notify=notify)
+
+    async def _run_job_locked(self, sid: str, request: str, *, notify: str) -> None:
         chat = self.ctx.chat
         on_change = notify == "on_change"
+        exec_id = secrets.token_hex(6)
+        started = iso()
         if not on_change:  # a watch stays quiet unless something changed, so no "running" preamble
             await self.ctx.notifier.send(f"Scheduled job: {request}", None)
-        if chat.assistant is None:
-            chat.store.add("friday", "I couldn't run that: the model isn't configured.")
-            return
+        # Isolated run state: clear any stragglers, then this run owns these slots until we finalize.
         self._pending_watch.pop(sid, None)
         self._outcomes.pop(sid, None)
+        if chat.assistant is None:
+            await self._finalize(sid, exec_id, started, on_change=on_change, outcome="missing_model",
+                                 reply="The scheduled job didn't run: the model isn't configured.", pending=None)  # fmt: skip
+            return
         try:
             reply = await chat.assistant.reply(request, origin=f"schedule:{sid}", schedule_id=sid,
                                                watch_id=sid if on_change else None)  # fmt: skip
         except Exception as e:
             log.warning("scheduled job %s failed: %s", sid, type(e).__name__)
-            reply = f"The scheduled job didn't run: {type(e).__name__}."
-            if on_change:
-                await self._watch_error(sid, reply)
-            else:
-                chat.store.add("friday", reply)
-                await self._notify_reply(reply)
+            self._pending_watch.pop(sid, None)  # a hard failure never commits a staged success
+            self._outcomes.pop(sid, None)
+            await self._finalize(sid, exec_id, started, on_change=on_change, outcome="error",
+                                 reply=f"The scheduled job didn't run: {type(e).__name__}.", pending=None)  # fmt: skip
             return
         outcome = self._outcomes.pop(sid, {"status": "done", "stopped_by_approval": False})
+        pending = self._pending_watch.pop(sid, None)
         if outcome.get("stopped_by_approval"):
-            # An approval expired or was denied while the owner was away: say exactly what didn't
-            # happen and offer a one-tap re-run. (The approval card itself already pinged the notifier.)
-            msg = f"{reply}\nSay `run {sid}` to do it now."
-            chat.store.add("friday", msg)
-            await self._notify_reply(msg)
+            await self._finalize(sid, exec_id, started, on_change=on_change, outcome="approval_denied",
+                                 reply=reply, pending=None, rerun_sid=sid)  # fmt: skip
             return
+        if outcome.get("status") not in ("done", None):
+            # Blocked / replans exhausted: a staged watch success is discarded, not committed.
+            await self._finalize(sid, exec_id, started, on_change=on_change, outcome="blocked", reply=reply, pending=None)
+            return
+        await self._finalize(sid, exec_id, started, on_change=on_change, outcome="success", reply=reply, pending=pending)
+
+    async def _finalize(self, sid: str, exec_id: str, started: str, *, on_change: bool, outcome: str,
+                        reply: str, pending: dict[str, Any] | None, rerun_sid: str | None = None) -> None:
+        """One path for every run's end: durable record, watch accounting, chat + notifier delivery.
+        A failed/blocked/denied run never commits a staged value and keeps the previous good one."""
+        now = iso()
+        red = self.ctx.redactor
+        msg = reply if rerun_sid is None else f"{reply}\nReply `run {rerun_sid}` (and approve) to run it now."
         if on_change:
-            await self._apply_watch(sid, reply, failed=outcome.get("status") not in ("done", None))
+            if outcome == "success":
+                if pending is None:
+                    self._upsert_state(sid, last_checked_at=now, last_error=None)
+                    self._record_run(exec_id, sid, "no_change_missing_report", started, now)
+                    log.info("watch %s: no watch_report; treated as no change", sid)
+                    return
+                val = red.redact(pending["value"])
+                if pending["changed"]:
+                    self._upsert_state(sid, last_checked_at=now, last_error=None, last_value=val,
+                                       last_summary=red.redact(pending["summary"]), last_changed_at=now)  # fmt: skip
+                    self._record_run(exec_id, sid, "changed", started, now, detail=red.redact(pending["summary"]), value=val)
+                    self.ctx.chat.store.add("friday", pending["summary"])
+                    await self._notify_reply(pending["summary"])
+                else:
+                    self._upsert_state(sid, last_checked_at=now, last_error=None)
+                    self._record_run(exec_id, sid, "no_change", started, now, value=val)
+                return
+            # watch failure (error / blocked / approval_denied / missing_model): last-checked always
+            # moves, the previous good value/change-time is preserved, and the error posts once.
+            await self._watch_error(sid, msg, exec_id=exec_id, started=started, outcome=outcome)
             return
-        chat.store.add("friday", reply)
-        await self._notify_reply(reply)
+        # non-watch ("always") job: full reply to chat, redacted+capped to external channels, durable.
+        self._record_run(exec_id, sid, outcome, started, now, detail=red.redact(reply))
+        self.ctx.chat.store.add("friday", msg)
+        await self._notify_reply(msg)
+
+    def _record_run(self, exec_id: str, sid: str, outcome: str, started: str, finished: str, *,
+                    detail: str = "", value: str | None = None) -> None:
+        """One durable, redacted row per run (survives restart; holds the full reply the chat caps)."""
+        self.ctx.db.execute(
+            "INSERT INTO schedule_runs (id, schedule_id, outcome, detail, value, started_at, finished_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)", (exec_id, sid, outcome, detail or None, value, started, finished),
+        )
 
     async def _notify_reply(self, reply: str) -> None:
         """Deliver a scheduled job's final reply to the external channels (Telegram etc.), redacted
@@ -324,29 +404,13 @@ class Scheduler:
             self.ctx.db.execute(f"UPDATE schedule_state SET {', '.join(f'{k} = ?' for k in cols)} WHERE schedule_id = ?",
                                 (*cols.values(), sid))  # fmt: skip
 
-    async def _apply_watch(self, sid: str, reply: str, *, failed: bool) -> None:
-        """After an on_change run: update last-checked always; post only when the value changed."""
-        now = iso()
-        pending = self._pending_watch.pop(sid, None)
-        if failed and pending is None:
-            await self._watch_error(sid, reply)
-            return
-        self._upsert_state(sid, last_checked_at=now, last_error=None)
-        if pending is None:
-            # The run finished without calling watch_report: treat as no change, say nothing.
-            log.info("watch %s: no watch_report; treated as no change", sid)
-            return
-        if pending["changed"]:
-            self._upsert_state(sid, last_value=self.ctx.redactor.redact(pending["value"]),
-                               last_summary=self.ctx.redactor.redact(pending["summary"]), last_changed_at=now)  # fmt: skip
-            self.ctx.chat.store.add("friday", pending["summary"])
-            await self._notify_reply(pending["summary"])
-
-    async def _watch_error(self, sid: str, reply: str) -> None:
-        """Post a watch's failure once; suppress an identical repeat on the next fire."""
+    async def _watch_error(self, sid: str, reply: str, *, exec_id: str, started: str, outcome: str) -> None:
+        """Post a watch's failure once; suppress an identical repeat on the next fire. Always records
+        last-checked and a durable run row; never touches the preserved last good value."""
         text = self.ctx.redactor.redact(reply)
         st = self._state(sid)
         self._upsert_state(sid, last_checked_at=iso())
+        self._record_run(exec_id, sid, outcome, started, iso(), detail=text)
         if st and st.get("last_error") == text:
             log.info("watch %s: same error as last time; suppressed", sid)
             return

@@ -281,6 +281,22 @@ MIGRATIONS: list[str] = [
         last_changed_at TEXT
     );
     """,
+    """
+    -- One durable, redacted record per scheduled run (fire or run-now). Outcome is one of
+    -- changed | no_change | no_change_missing_report | error | blocked | approval_denied |
+    -- missing_model. `detail` holds the full redacted reply/summary/error (the chat store caps
+    -- messages, this does not), so a long result survives restart and stays inspectable.
+    CREATE TABLE schedule_runs (
+        id TEXT PRIMARY KEY,
+        schedule_id TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        detail TEXT,
+        value TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT NOT NULL
+    );
+    CREATE INDEX schedule_runs_sid ON schedule_runs(schedule_id, started_at);
+    """,
 ]
 
 

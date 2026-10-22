@@ -1,11 +1,34 @@
-"""Reminders and recurring jobs as tools (friday/scheduler.py)."""
+"""Reminders and recurring jobs as tools (friday/scheduler.py).
+
+Creating, pausing, resuming, cancelling or running a schedule all change what friday will do on its
+own later, so every one of them needs the owner's tap on an approval card, decided in code
+(friday.agent.approvals) - the model can never resolve it. owner_quote is still required, but it is
+not the security boundary: a page-influenced model can copy the owner's whole request, so the quote
+alone is not proof of authority. The card shows the exact operation, the schedule and its timing.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from friday.scheduler import ScheduleError
+from friday.scheduler import ScheduleError, describe, normalise
 from friday.tools.base import Call, Tool, ToolError
+
+
+def _match_reason(ctx: Any, op: str, query: str) -> str:
+    """A short, read-only description of which schedule(s) a mutation would hit, for the card."""
+    sched = ctx.scheduler
+    if op == "pause":
+        base = [s for s in sched.list() if not s["paused"]]
+    elif op == "resume":
+        base = [s for s in sched.list() if s["paused"]]
+    elif op == "run":
+        base = [s for s in sched.list(include_done=True) if not s["paused"] or True]
+        base = [s for s in base if s["kind"] == "job"]
+    else:  # cancel
+        base = sched.list()
+    hits = sched._match(query, base)
+    return ", ".join(f"{h['id']} “{h['text'][:50]}”" for h in hits) or f"“{query}” (no match yet)"
 
 WHEN = {
     "type": "object",
@@ -28,6 +51,16 @@ class ScheduleCreate(Tool):
               "required": ["kind", "text", "when"]}  # fmt: skip
     effect = "write"
     needs_owner_quote = True
+
+    def approval(self, args: dict[str, Any], call: Call) -> str | None:
+        notify = args.get("notify") or "always"
+        try:
+            when = describe(normalise(args["when"]))
+        except Exception:
+            when = str(args.get("when"))
+        text = " ".join(str(args.get("text", "")).split())[:80]
+        watch = " as a watch (quiet until it changes)" if notify == "on_change" else ""
+        return f"Create a {args['kind']}: “{text}”, {when}{watch}."
 
     async def run(self, args: dict[str, Any], call: Call) -> Any:
         try:
@@ -53,6 +86,9 @@ class ScheduleCancel(Tool):
     effect = "write"
     needs_owner_quote = True
 
+    def approval(self, args: dict[str, Any], call: Call) -> str | None:
+        return f"Cancel schedule(s): {_match_reason(call.ctx, 'cancel', str(args['query']))}."
+
     async def run(self, args: dict[str, Any], call: Call) -> Any:
         gone = call.ctx.scheduler.cancel(args["query"])
         if not gone:
@@ -67,6 +103,9 @@ class SchedulePause(Tool):
     schema = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
     effect = "write"
     needs_owner_quote = True
+
+    def approval(self, args: dict[str, Any], call: Call) -> str | None:
+        return f"Pause schedule(s): {_match_reason(call.ctx, 'pause', str(args['query']))}."
 
     async def run(self, args: dict[str, Any], call: Call) -> Any:
         hits = call.ctx.scheduler.pause(args["query"])
@@ -83,12 +122,21 @@ class ScheduleResume(Tool):
     effect = "write"
     needs_owner_quote = True
 
+    def approval(self, args: dict[str, Any], call: Call) -> str | None:
+        return f"Resume schedule(s): {_match_reason(call.ctx, 'resume', str(args['query']))}."
+
     async def run(self, args: dict[str, Any], call: Call) -> Any:
         hits = call.ctx.scheduler.resume(args["query"])
         if not hits:
             raise ToolError("no paused reminder or job matches that")
-        return {"resumed": [{"id": s["id"], "next": s["next"]} for s in hits],
-                "verified": [f"{len(hits)} schedule(s) resumed, next {hits[0]['next']}"]}  # fmt: skip
+        resumed = [s for s in hits if not s.get("expired")]
+        expired = [s for s in hits if s.get("expired")]
+        verified = [f"{len(resumed)} schedule(s) resumed" + (f", next {resumed[0]['next']}" if resumed else "")]
+        if expired:
+            verified.append(f"{len(expired)} one-time schedule(s) had already passed and were NOT fired; "
+                            "set a new time if you still want them")  # fmt: skip
+        return {"resumed": [{"id": s["id"], "next": s["next"]} for s in resumed],
+                "expired": [{"id": s["id"], "text": s["text"]} for s in expired], "verified": verified}  # fmt: skip
 
 
 class ScheduleRunNow(Tool):
@@ -97,6 +145,9 @@ class ScheduleRunNow(Tool):
     schema = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
     effect = "write"
     needs_owner_quote = True
+
+    def approval(self, args: dict[str, Any], call: Call) -> str | None:
+        return f"Run now (one-off, next fire unchanged): {_match_reason(call.ctx, 'run', str(args['query']))}."
 
     async def run(self, args: dict[str, Any], call: Call) -> Any:
         hits = call.ctx.scheduler.run_now(args["query"])
