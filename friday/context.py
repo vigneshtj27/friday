@@ -64,6 +64,7 @@ class AppContext:
     preflight: Any = field(default=None)
     browsercheck: Any = field(default=None)
     onboarding: Any = field(default=None)
+    vault_requests: Any = field(default=None)
 
     def portal_link(self, fragment: str = "") -> str:
         return f"{self.settings.public_base_url.rstrip('/')}/portal#{fragment}"
@@ -135,8 +136,10 @@ def build_context(
 
     ctx.browsercheck = BrowserCheck(ctx)
     from friday.onboarding import Onboarding
+    from friday.vault_requests import VaultRequests
 
     ctx.onboarding = Onboarding(ctx)
+    ctx.vault_requests = VaultRequests(ctx)
     if chat_llm_factory is None:
         from friday.agent.llm import AnthropicLLM
 

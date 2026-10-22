@@ -23,7 +23,7 @@ from friday.vault.masking import Redactor
 
 log = logging.getLogger(__name__)
 
-CARD_KINDS = ("otp", "approval", "handoff", "run", "setup", "plan")
+CARD_KINDS = ("otp", "approval", "handoff", "run", "setup", "plan", "vault")
 # A whole message that is just a code ("284113", "284 113", "G-482913").
 _CODE_MESSAGE = re.compile(r"[A-Za-z]{0,2}-?\d[\d -]{2,10}\d")
 # Code-like numbers inside a sentence: 5-8 digits, or 3+3 digits. Dates, years, amounts with

@@ -248,6 +248,23 @@ MIGRATIONS: list[str] = [
     ALTER TABLE transactions ADD COLUMN status TEXT NOT NULL DEFAULT 'bank';
     ALTER TABLE transactions ADD COLUMN evidence_ref TEXT;
     """,
+    """
+    -- In-chat vault-request cards: collect any missing secret straight into the vault. The field
+    -- list and each secret's vault name are chosen in code (never by the model or owner free text);
+    -- values never touch this table - only the field labels and vault names do.
+    CREATE TABLE vault_requests (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        fields_json TEXT NOT NULL,
+        resume_json TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        completed_at TEXT
+    );
+    """,
 ]
 
 

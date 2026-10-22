@@ -51,6 +51,7 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
             sorted(a.id for a in ctx.gate.pending()),
             sorted(h.id for h in ctx.handoffs.list_open()),
             sorted(r["id"] for r in ctx.onboarding.pending()) if ctx.onboarding else [],
+            sorted(r["id"] for r in ctx.vault_requests.pending()) if ctx.vault_requests else [],
             sorted(ctx.jobs.active()) if ctx.jobs else [],
             [tuple(r) for r in ctx.db.query("SELECT id, updated_at FROM plans WHERE status IN ('planning', 'running')")],
             typing(),
@@ -84,6 +85,8 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
                     "reason": r["reason"], "remote_view": bool(h and h.vnc), "link": f"/handoff/{ref}"}  # fmt: skip
         if kind == "setup":
             return ctx.onboarding.card(ref)
+        if kind == "vault":
+            return ctx.vault_requests.card(ref)
         if kind == "plan":
             r = ctx.db.query_one("SELECT status, state_json FROM plans WHERE id = ?", (ref,))
             if r is None:
@@ -116,6 +119,9 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
         setups = ctx.onboarding.pending()
         if setups:
             parts.append(f"{len(setups)} setup card{'s' if len(setups) > 1 else ''} ({', '.join(r['profile_id'] for r in setups)})")
+        vaults = ctx.vault_requests.pending() if ctx.vault_requests else []
+        if vaults:
+            parts.append(f"{len(vaults)} secret card{'s' if len(vaults) > 1 else ''} ({', '.join(r['title'] for r in vaults)})")
         if otp:
             parts.append(f"{len(otp)} code request{'s' if len(otp) > 1 else ''} ({', '.join(r.profile_id for r in otp)})")
         if appr:
@@ -183,6 +189,34 @@ def register_chat(app: FastAPI, ctx: AppContext, require: Any, auth: Any) -> Non
     async def setup_cancel(setup_id: str):
         if not ctx.onboarding.cancel(setup_id):
             raise HTTPException(404, "setup request is not pending")
+        await ctx.chat.send("Cancelled. Nothing was saved.")
+        return {"ok": True}
+
+    @app.post("/api/vault-request/{request_id}", dependencies=deps)
+    async def vault_request_submit(request_id: str, request: Request):
+        # Hand-parsed like setup_submit: FastAPI's validation errors echo the input, and these are secrets.
+        from friday.vault_requests import VaultRequestError
+
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "expected a JSON body") from None
+        raw = body.get("values") if isinstance(body, dict) else None
+        if not isinstance(raw, dict) or len(raw) > 8 or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
+            raise HTTPException(400, "values must be an object of text fields")
+        values: dict[str, str] = dict(raw)
+        raw.clear()
+        try:
+            return await ctx.vault_requests.complete(request_id, values)
+        except VaultRequestError as e:
+            raise HTTPException(400, str(e)) from None
+        finally:
+            values.clear()
+
+    @app.post("/api/vault-request/{request_id}/cancel", dependencies=deps)
+    async def vault_request_cancel(request_id: str):
+        if not ctx.vault_requests.cancel(request_id):
+            raise HTTPException(404, "vault request is not pending")
         await ctx.chat.send("Cancelled. Nothing was saved.")
         return {"ok": True}
 

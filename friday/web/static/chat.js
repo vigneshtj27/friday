@@ -40,6 +40,7 @@ const ICONS = {
   approval: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg>',
   handoff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 22h8"/><path d="M12 18v4"/></svg>',
   setup: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+  vault: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
   run: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"/><path d="M14 2v6h6"/><path d="M9 15l2 2 4-4"/></svg>',
 };
 
@@ -138,6 +139,25 @@ function cardHTML(m) {
         <div class="row">${countdown(m.ref)}<span class="grow"></span>
           <button class="btn" type="button" data-setup-cancel="${esc(m.ref)}">Cancel</button>
           <button class="btn primary" type="submit">${c.new_site ? "Confirm site and save" : "Save and continue"}</button></div>
+      </form></div>`;
+  }
+  if (m.kind === "vault") {
+    const header = head(c.title || "Secret needed", acct).replace(pill(c.status), pill(c.status === "done" ? "saved" : c.status));
+    if (!live) {
+      const msg = { done: "Saved to the encrypted vault. friday's assistant never saw it.", cancelled: "Cancelled. Nothing was saved.", expired: "This card expired. Nothing was saved." }[c.status] || "";
+      return header + `<div class="card-main"><p class="card-sub" style="margin:0">${esc(msg)}</p></div>`;
+    }
+    const fields = (c.fields || []).map((f) => `<label class="field"><span>${esc(f.label)}</span>
+        <input name="${esc(f.name)}" type="${f.input === "text" ? "text" : "password"}" autocomplete="off"
+          autocapitalize="off" spellcheck="false" ${!f.optional && !f.saved ? "required" : ""}
+          placeholder="${f.saved ? "already saved: leave blank to keep" : ""}"></label>`).join("");
+    return header + `<div class="card-main">
+      ${c.purpose ? `<p class="card-sub">${esc(c.purpose)}</p>` : ""}
+      <form class="setup" data-vault="${esc(m.ref)}" autocomplete="off">${fields}
+        <p class="card-sub lock">These go straight to friday's encrypted vault. The chat and the assistant never see them.</p>
+        <div class="row">${countdown(m.ref)}<span class="grow"></span>
+          <button class="btn" type="button" data-vault-cancel="${esc(m.ref)}">Cancel</button>
+          <button class="btn primary" type="submit">Save</button></div>
       </form></div>`;
   }
   if (m.kind === "plan") {
@@ -330,6 +350,24 @@ thread.addEventListener("submit", (e) => {
     });
     return;
   }
+  const vf = e.target.closest("[data-vault]");
+  if (vf) {
+    e.preventDefault();
+    const values = {};
+    for (const el of vf.querySelectorAll("input[name]")) { if (el.value) values[el.name] = el.value; }
+    busy(vf.querySelector("button[type=submit]"), async () => {
+      try {
+        await req("POST", `/api/vault-request/${encodeURIComponent(vf.dataset.vault)}`, { values });
+        for (const el of vf.querySelectorAll("input")) el.value = "";
+        document.activeElement?.blur();
+        toast("Saved to the vault");
+      } finally {
+        for (const k of Object.keys(values)) values[k] = "";
+      }
+      await refresh();
+    });
+    return;
+  }
   const f = e.target.closest("[data-otp]");
   if (!f) return;
   e.preventDefault();
@@ -346,11 +384,17 @@ thread.addEventListener("submit", (e) => {
 
 thread.addEventListener("click", (e) => {
   const ap = e.target.closest("[data-ap]"), done = e.target.closest("[data-done]"), shot = e.target.closest(".shot");
-  const sc = e.target.closest("[data-setup-cancel]");
+  const sc = e.target.closest("[data-setup-cancel]"), vc = e.target.closest("[data-vault-cancel]");
   if (e.target.id === "older") return loadOlder(e.target);
   if (sc) {
     return busy(sc, async () => {
       await req("POST", `/api/setup/${encodeURIComponent(sc.dataset.setupCancel)}/cancel`);
+      await refresh();
+    });
+  }
+  if (vc) {
+    return busy(vc, async () => {
+      await req("POST", `/api/vault-request/${encodeURIComponent(vc.dataset.vaultCancel)}/cancel`);
       await refresh();
     });
   }
