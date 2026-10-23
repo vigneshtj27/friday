@@ -55,6 +55,10 @@ class Call:
     trusted_targets: set[str] = field(default_factory=set)  # ids/names the owner or memory named
     origin: str = "owner"  # "owner" | "schedule:<id>"
     watch_id: str | None = None  # the schedule id, only while running an on_change watch job
+    # A playbook run narrows what is allowed: a tool whose effect is not in this set is denied, and
+    # an effect named in require_approval always gets a card. None means no playbook narrowing.
+    allowed_effects: set[str] | None = None
+    require_approval: set[str] = field(default_factory=set)
 
     async def say(self, text: str) -> None:
         if self.progress:
@@ -192,6 +196,10 @@ class ToolRegistry:
             raise ToolError(f"{name} isn't available: {getattr(tool, 'unavailable_reason', 'not set up')}")
         args = dict(args or {})
         validate(args, tool.spec()["input_schema"])
+        # A playbook run can only narrow: a tool whose effect the playbook didn't allow is refused.
+        if call.allowed_effects is not None and tool.effect not in call.allowed_effects:
+            ctx.audit.record("tool.refused", actor="assistant", tool=name, reason=f"effect {tool.effect} not allowed by the playbook")
+            raise ToolError(f"{name} ({tool.effect}) is outside what this playbook is allowed to do")
         if tool.needs_owner_quote:
             quote = str(args.pop("owner_quote", ""))
             if not call.owner_said(quote):
@@ -204,6 +212,9 @@ class ToolRegistry:
             reason = tool.approval(args, call) or await tool.precheck(args, call)
             if reason is None and getattr(ctx.settings, "approve_private_writes", False):
                 reason = tool.approval(args, call) or f"{name}: {json.dumps(args, default=_jsonable)[:200]}"
+        if reason is None and tool.effect in call.require_approval and tool.effect != "read":
+            # A playbook asked for a tap on this effect class even though code wouldn't require one.
+            reason = tool.approval(args, call) or f"{name} ({tool.effect}) - required by the playbook"
         if reason is not None:
             await call.say(f"Waiting for your approval: {reason}")
             tasks = getattr(ctx, "tasks", None)

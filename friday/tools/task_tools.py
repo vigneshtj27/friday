@@ -82,8 +82,9 @@ class TaskResume(Tool):
             raise ToolError("can't resume: the model isn't configured")
         note = (" Note: a step was in flight when it stopped; its tool re-checks state before acting." if uncertain else "")
         # Re-run the stored request as a fresh plan. Its tools re-verify state (read-back), so an
-        # already-applied write is skipped rather than duplicated.
-        reply = await ctx.chat.assistant.reply(t["request"], origin="owner")
+        # already-applied write is skipped rather than duplicated. run_nested avoids re-taking the
+        # chat lock (we're already inside a reply) and keeps the outer plan's state intact.
+        reply = await ctx.chat.assistant.run_nested(t["request"], origin="owner")
         return {"resumed": t["id"], "uncertain_steps": len(uncertain), "reply": reply + note,
                 "verified": [f"task {t['id']} resumed"]}  # fmt: skip
 

@@ -51,24 +51,32 @@ class ChatAssistant:
         return "\n".join(lines)
 
     async def reply(self, text: str, *, origin: str = "owner", schedule_id: str | None = None,
-                    watch_id: str | None = None) -> str:  # fmt: skip
+                    watch_id: str | None = None, constraints: dict[str, Any] | None = None) -> str:  # fmt: skip
         """Answer one owner message (or a job the owner scheduled), using tools as needed. Returns the reply text."""
         async with self._lock:
             self.busy = True
             self.ctx.chat.store.touch()
             try:
-                return await self._reply(text, origin, schedule_id, watch_id)
+                return await self._reply(text, origin, schedule_id, watch_id, constraints)
             finally:
                 self.busy = False
                 self.ctx.chat.store.touch()
 
     async def _reply(self, text: str, origin: str = "owner", schedule_id: str | None = None,
-                     watch_id: str | None = None) -> str:  # fmt: skip
+                     watch_id: str | None = None, constraints: dict[str, Any] | None = None) -> str:  # fmt: skip
         recap = self._recap()
         if self._notes:
             recap += ("\n" if recap else "") + "Since the last message: " + " ".join(self._notes)
             self._notes = []
-        return await self.planner.handle(text, recap=recap, origin=origin, schedule_id=schedule_id, watch_id=watch_id)
+        return await self.planner.handle(text, recap=recap, origin=origin, schedule_id=schedule_id,
+                                         watch_id=watch_id, constraints=constraints)  # fmt: skip
+
+    async def run_nested(self, text: str, *, origin: str = "owner", constraints: dict[str, Any] | None = None) -> str:
+        """Run a request from inside another run (a playbook, a resume) without re-taking the reply
+        lock or clobbering the outer plan's state: a fresh Planner on the same ctx and model."""
+        from friday.planner import Planner
+
+        return await Planner(self.ctx, self._llm_factory).handle(text, origin=origin, constraints=constraints)
 
     def status_line(self) -> str | None:
         return self.planner.status_line()
@@ -262,7 +270,6 @@ class ChatAssistant:
 
     async def _find_site(self, provider: str) -> Any:
         from friday.onboarding import SiteFinder, check_reachable, validate_proposal
-
         from friday.profiles.models import site_problems
 
         known = [s for s in self.ctx.sites.list() if provider.lower() in (s.id, s.name.lower())]

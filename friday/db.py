@@ -356,6 +356,42 @@ MIGRATIONS: list[str] = [
         warned_at TEXT NOT NULL
     );
     """,
+    """
+    -- Playbooks: owner-approved, versioned instructions for a repeatable task, plus a small header
+    -- that can only NARROW what a run may do (allowed domains, allowed effect classes, required
+    -- approvals, a success check). A playbook is created and edited only by an owner tap on an
+    -- approval card (the tool needs owner_quote AND a card), never by a web page. `body` and the
+    -- header are redacted before they land here.
+    CREATE TABLE playbooks (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        goal TEXT NOT NULL,
+        body TEXT NOT NULL,
+        allowed_domains_json TEXT NOT NULL DEFAULT '[]',
+        allowed_effects_json TEXT NOT NULL DEFAULT '["read"]',
+        required_approvals_json TEXT NOT NULL DEFAULT '[]',
+        success_check TEXT,
+        version INTEGER NOT NULL DEFAULT 1,
+        last_good_version INTEGER,
+        status TEXT NOT NULL DEFAULT 'active',
+        source_run TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    -- Full history: every save writes a version row, so a diff can be shown and a failed success
+    -- check can roll back to the last-good version.
+    CREATE TABLE playbook_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        playbook_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        goal TEXT NOT NULL,
+        body TEXT NOT NULL,
+        header_json TEXT NOT NULL,
+        success_check TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE (playbook_id, version)
+    );
+    """,
 ]
 
 
