@@ -291,6 +291,10 @@ class Scheduler:
                 task = asyncio.create_task(self._run_job(r["id"], r["text"], notify=r["notify"]))
                 self._jobs.add(task)
                 task.add_done_callback(self._jobs.discard)
+        # Opt-in nudges: re-notify about a waiting task only if the owner gave it a deadline.
+        if self.ctx.tasks is not None:
+            for t in self.ctx.tasks.due_nudges(iso(now)):
+                await self.ctx.notifier.send(f"Still waiting on you: “{t['request'][:100]}” (task {t['id']}).", None)
         return fired
 
     def _lock_for(self, sid: str) -> asyncio.Lock:

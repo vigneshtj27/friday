@@ -297,6 +297,41 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX schedule_runs_sid ON schedule_runs(schedule_id, started_at);
     """,
+    """
+    -- Task ledger: one durable row per owner-requested task (its plan id is the task id). Scheduled
+    -- fires do not create task rows (they record schedule_runs); they still journal their side
+    -- effects for crash safety. status: planned|running|waiting_on_me|blocked|interrupted|done|
+    -- cancelled. All text is redacted before it lands here; no secrets.
+    CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        request TEXT NOT NULL,
+        origin TEXT NOT NULL,
+        schedule_id TEXT,
+        status TEXT NOT NULL,
+        next_step TEXT,
+        closeout TEXT,
+        evidence_json TEXT,
+        deadline_at TEXT,
+        notified_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX tasks_status ON tasks(status, updated_at);
+    -- Side-effecting steps are journaled before (started) and after (finished), so a step that was
+    -- in flight at a crash is detectable: a 'started' with no matching 'finished'. On resume such a
+    -- step is never silently re-run; its tool re-checks state (read-back) and the owner is asked.
+    CREATE TABLE task_journal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        effect TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        marker TEXT,
+        ts TEXT NOT NULL
+    );
+    CREATE INDEX task_journal_plan ON task_journal(plan_id, step_id);
+    """,
 ]
 
 

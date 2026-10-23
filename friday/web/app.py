@@ -99,11 +99,24 @@ def create_app(ctx: AppContext) -> FastAPI:
         for r in broken:
             log.warning("profile %s identity mismatch: %s", r.profile_id, "; ".join(r.issues))
 
+    def _recover_tasks() -> None:
+        """A restart leaves in-flight tasks interrupted; tell the owner so they can resume or drop."""
+        try:
+            interrupted = ctx.tasks.recover()
+        except Exception:
+            log.exception("task recovery failed at startup")
+            return
+        for t in interrupted:
+            step = f" (was: {t['next_step']})" if t.get("next_step") else ""
+            ctx.chat.store.add("friday", f"A restart interrupted a task: “{t['request'][:120]}”{step}. "
+                               f"It was not re-run. Say “resume {t['id']}” to continue it, or “drop {t['id']}” to let it go.")  # fmt: skip
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await ctx.notifier.start(ctx.broker.handle_reply)  # chat replies resolve pending OTP requests
         ctx.scheduler.start()
         _startup_doctor()
+        _recover_tasks()
         yield
         await ctx.scheduler.stop()
         await ctx.jobs.shutdown()

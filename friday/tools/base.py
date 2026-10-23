@@ -206,8 +206,15 @@ class ToolRegistry:
                 reason = tool.approval(args, call) or f"{name}: {json.dumps(args, default=_jsonable)[:200]}"
         if reason is not None:
             await call.say(f"Waiting for your approval: {reason}")
-            ok = await ctx.gate.request(profile_id="assistant", run_id=call.plan_id, action=reason,
-                                        details={"tool": name, "args": args})  # fmt: skip
+            tasks = getattr(ctx, "tasks", None)
+            if tasks is not None and call.plan_id:
+                tasks.waiting(call.plan_id, reason)  # the task is now blocked on the owner's tap
+            try:
+                ok = await ctx.gate.request(profile_id="assistant", run_id=call.plan_id, action=reason,
+                                            details={"tool": name, "args": args})  # fmt: skip
+            finally:
+                if tasks is not None and call.plan_id:
+                    tasks.running(call.plan_id)
             if not ok:
                 ctx.audit.record("tool.denied", actor="owner", tool=name)
                 raise ApprovalDenied(f"the owner did not approve: {reason}")

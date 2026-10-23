@@ -65,6 +65,7 @@ class AppContext:
     browsercheck: Any = field(default=None)
     onboarding: Any = field(default=None)
     vault_requests: Any = field(default=None)
+    tasks: Any = field(default=None)
 
     def portal_link(self, fragment: str = "") -> str:
         return f"{self.settings.public_base_url.rstrip('/')}/portal#{fragment}"
@@ -129,6 +130,9 @@ def build_context(
     from friday.scheduler import Scheduler
 
     ctx.scheduler = Scheduler(ctx)
+    from friday.tasks import TaskLedger
+
+    ctx.tasks = TaskLedger(ctx)
     from friday.preflight import Preflight
 
     ctx.preflight = Preflight(ctx)

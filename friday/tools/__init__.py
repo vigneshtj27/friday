@@ -8,13 +8,13 @@ from friday.tools.base import ApprovalDenied, Call, Tool, ToolError, ToolRegistr
 
 
 def build_registry(ctx: Any, llm_factory: Any = None) -> ToolRegistry:
-    from friday.tools import accounts, google_tools, memory_tools, schedule_tools, vault_tools
+    from friday.tools import accounts, google_tools, memory_tools, schedule_tools, task_tools, vault_tools
     from friday.tools.files import FilesList, FilesRead, TableCompute
     from friday.tools.web import WebFetch, WebSearch
 
     reg = ToolRegistry(ctx)
     reg.register(*accounts.TOOLS, *google_tools.TOOLS, WebSearch(llm_factory), WebFetch(), FilesList(), FilesRead(),
-                 TableCompute(), *memory_tools.TOOLS, *schedule_tools.TOOLS, *vault_tools.TOOLS)  # fmt: skip
+                 TableCompute(), *memory_tools.TOOLS, *schedule_tools.TOOLS, *vault_tools.TOOLS, *task_tools.TOOLS)  # fmt: skip
     return reg
 
 

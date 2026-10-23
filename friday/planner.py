@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
+from friday.tasks import SIDE_EFFECTS
 from friday.tools.base import ApprovalDenied, Call, ToolError, _jsonable
 from friday.util import iso
 
@@ -108,6 +109,9 @@ it stands on its own. Times are in the owner's timezone (in the context). owner_
 A recurring check that should only speak up when something changes ("tell me when a slot opens", "watch SBIN and ping \
 me if it moves") is a job with notify=on_change (a watch). pause/resume/run a schedule with schedule_pause / \
 schedule_resume / schedule_run_now (for "run <id>"); all of these, like create and cancel, need owner_quote.
+- "what's open" / "what am I working on" -> tasks_open; "what's waiting on me" -> tasks_waiting; "cancel task N" -> \
+task_cancel; "resume <id>" / "drop <id>" (after a restart) -> task_resume / task_drop; "remind me about task N / set a \
+deadline on it" -> task_set_deadline. These act only on friday's own tasks and need owner_quote.
 - Never ask for passwords, codes, card numbers, API keys or proxy details; collect any missing secret with \
 account_setup (site logins) or vault_request (anything else) - never ask the owner to type a secret as chat text, \
 and never plan around a missing secret. If the owner pastes something that looks like a secret, do not quote it back \
@@ -332,6 +336,8 @@ class Planner:
         self.current = state
         call = Call(ctx=self.ctx, owner_text=request, plan_id=state.id, trusted_targets=self._trusted_targets(),
                     origin=origin, watch_id=watch_id)  # fmt: skip
+        if self.ctx.tasks is not None:
+            self.ctx.tasks.open(state.id, request, origin=origin, schedule_id=schedule_id)
         if watch_id:
             recap = (recap + "\n" if recap else "") + WATCH_DIRECTIVE
         results: dict[str, Any] = {}
@@ -355,8 +361,11 @@ class Planner:
                     self._save(state)
                     reply = plan.get("reply") or ("Done." if evidence is None else "I couldn't finish that.")
                     if evidence is None:
+                        self._close_task(state, reply, verified, False)
                         return reply
-                    return self._final(reply, verified, state, blocked=True)
+                    final = self._final(reply, verified, state, blocked=True)
+                    self._close_task(state, final, verified, stopped_by_owner)
+                    return final
                 if len(steps) > MAX_STEPS:
                     steps = steps[:MAX_STEPS]
                 for s in steps:
@@ -390,7 +399,9 @@ class Planner:
                 await say(f"That didn't work ({str(failure)[:120]}); trying another way")
             self._save(state)
             message = await self._report(request, state, results, evidence, stopped_by_owner)
-            return self._final(message, verified, state, blocked=state.status != "done")
+            final = self._final(message, verified, state, blocked=state.status != "done")
+            self._close_task(state, final, verified, stopped_by_owner)
+            return final
         finally:
             self._remember_outcome(state)
             self.ctx.audit.record("assistant.plan", actor="assistant", plan=state.id, status=state.status,
@@ -402,10 +413,18 @@ class Planner:
     async def _execute(self, steps: list[dict[str, Any]], state: PlanState, call: Call, results: dict[str, Any],
                        verified: list[str]) -> Exception | None:  # fmt: skip
         records = {r.id: r for r in state.steps}
+        tasks = self.ctx.tasks
         for s in steps:
             rec = records[s["id"]]
             rec.status = "running"
             await call.say(rec.progress)
+            if tasks is not None:
+                tasks.running(state.id, rec.progress)
+            try:
+                effect = getattr(self.ctx.tools.tools.get(s["tool"]), "effect", "read")
+            except Exception:
+                effect = "read"
+            journaled = tasks is not None and effect in SIDE_EFFECTS
             try:
                 try:
                     args = json.loads(s.get("args_json") or "{}")
@@ -416,7 +435,12 @@ class Planner:
                 args = resolve(args, results)
                 if s.get("fill"):
                     args = await self._fill(s, args, results)
+                if journaled:
+                    tasks.journal_start(state.id, s["id"], s["tool"], effect)
                 result = await self.ctx.tools.call(s["tool"], args, call)
+                if journaled:
+                    marker = _short({k: result[k] for k in list(result)[:6]}, 200) if isinstance(result, dict) else None
+                    tasks.journal_finish(state.id, s["id"], s["tool"], effect, marker)
             except (ToolError, PlanError) as e:
                 rec.status, rec.detail = "failed", str(e)
                 self._save(state)
@@ -512,6 +536,15 @@ class Planner:
     def get(self, plan_id: str) -> dict[str, Any] | None:
         r = self.ctx.db.query_one("SELECT state_json FROM plans WHERE id = ?", (plan_id,))
         return json.loads(r["state_json"]) if r else None
+
+    _TASK_STATUS = {"done": "done", "blocked": "blocked", "stopped": "blocked", "running": "blocked", "planning": "blocked"}
+
+    def _close_task(self, state: PlanState, final: str, verified: list[str], by_owner: bool) -> None:
+        """Record the closeout for an owner task. A scheduled fire has no task row (no-op)."""
+        if self.ctx.tasks is None or self.ctx.tasks.get(state.id) is None:
+            return
+        status = self._TASK_STATUS.get(state.status, "blocked")
+        self.ctx.tasks.finish(state.id, status, closeout=final, evidence=list(dict.fromkeys(verified)) or None)
 
     def _remember_outcome(self, state: PlanState) -> None:
         if not state.steps:
