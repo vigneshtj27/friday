@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     approve_private_writes: bool = False
     planner_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     chat_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"  # the chat assistant: quick replies
+    # Cumulative model-spend cap across all callers, enforced in code (friday/usage.py). 0 disables
+    # it. At warn_fraction of the cap friday warns once in chat; at the cap it hard-stops new model
+    # calls (a plan in flight ends as blocked, not half-done). The window resets the running total.
+    model_budget_usd: float = 0.0
+    model_budget_window: Literal["day", "month", "total"] = "month"
+    model_budget_warn_fraction: float = 0.8
 
     # agent limits and pacing
     max_steps: int = 40

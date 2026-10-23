@@ -30,6 +30,7 @@ from typing import Any
 
 from friday.tasks import SIDE_EFFECTS
 from friday.tools.base import ApprovalDenied, Call, ToolError, _jsonable
+from friday.usage import BudgetExceeded
 from friday.util import iso
 
 log = logging.getLogger(__name__)
@@ -401,6 +402,14 @@ class Planner:
             message = await self._report(request, state, results, evidence, stopped_by_owner)
             final = self._final(message, verified, state, blocked=state.status != "done")
             self._close_task(state, final, verified, stopped_by_owner)
+            return final
+        except BudgetExceeded as e:
+            # The spend cap was reached. Stop cleanly: the task is blocked, not half-done. Any
+            # side-effecting step already journaled stays uncertain and is handled on resume.
+            state.status = "blocked"
+            self._save(state)
+            final = self._final(str(e), verified, state, blocked=True)
+            self._close_task(state, final, verified, False)
             return final
         finally:
             self._remember_outcome(state)

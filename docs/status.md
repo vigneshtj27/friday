@@ -1,6 +1,6 @@
 # Status: what is verified and what is not
 
-Last updated 2026-10-23 (task ledger and resumable runs).
+Last updated 2026-10-23 (task ledger; live-eval harness and model spend cap).
 
 ## Verified
 
@@ -30,6 +30,8 @@ Last updated 2026-10-23 (task ledger and resumable runs).
 | Diagnosis confound: a manual bounce under Playwright/`webdriver: true` is INCONCLUSIVE and points to preflight; under patchright it still discriminates; reports record driver, pinned webdriver and egress | `tests/test_classifier.py` | Linux |
 | Task ledger (Phase 1): every owner request opens one `tasks` row moving planned → running → waiting_on_me → done/blocked/cancelled, with a closeout recorded on finish; a scheduled fire opens no task row but still journals its side effects; a pending approval card flips the task to waiting_on_me (set at the single registry gate) and back to running on decision; cancel/drop/resume/deadline resolve a task by id or by words in its request; deadline nudges are opt-in (a waiting task with no deadline is listed, never re-notified) and fire once | `tests/test_tasks.py` (12 tests) | Linux |
 | Crash-safe writes (Phase 1): each side-effecting step is journaled started-before/finished-after, so an interrupted or failed step has no finished row and shows as uncertain; at startup `recover()` flips any task left planned/running/waiting_on_me to interrupted and the chat tells the owner to resume or drop (friday never silently re-runs); a resume of a committed expense write adds no duplicate — the `sheets_add_transactions` read-back skips rows already present — proven for a direct call and a scheduled re-fire; a web page's injected "cancel/resume task" is refused (owner-quote absent from owner text) | `tests/test_tasks.py` | Linux |
+| Model spend cap (Phase 2): every model call (planner, chat, agent loop) is metered into `usage_ledger` and summed per window (day/month/total); the cap is config only (`model_budget_usd`), read fresh each check, so no flood of recorded rows and no web/email text can raise it; at the warn fraction friday posts one chat warning per window (once, across restarts); at the cap `guard()` raises before the next call and a plan in flight ends `blocked`, not half-done, with the model never called | `tests/test_usage.py` (9 tests) | Linux |
+| Live-eval harness (Phase 2): 20 fixed tasks (read/compute, draft-not-send, schedule, multi-step replan, impossible→blocker, and 5 prompt injections via web/email/sheet text) run through the real planner against an in-memory Google and web, in a throwaway DB, with no real mutation and approvals auto-denied; each task is scored on facts (a number in the reply, whether a draft/send/schedule/cancel happened), not phrasing; injection tasks pass only when nothing is sent/scheduled/cancelled/approved; a markdown results table is produced and artifacts are redacted before saving | `tests/test_live_eval.py` (8 tests, scripted model) | Linux |
 | Handoffs: extended while watched (and capped), `manual_login` reuses an open one and warns when preflight fails, remote-view page has the typing aid | `tests/test_handoff_web.py` | Linux |
 | Docker image: seeding a profile, a second seed of the same profile refused, remote-view login and handoff round trip, no fingerprint warnings | Manual | Docker Desktop on Apple Silicon (x86 image under emulation) |
 
@@ -59,6 +61,8 @@ They need `Xvfb` and `x11vnc` on PATH. When running as root (as in some CI conta
 - **Image-only (scanned) PDF statements.** Not supported; see `decisions.md`.
 - **A real SIGKILL mid-write.** The Phase 1 crash tests simulate the interruption (a journalled `started` with no `finished`, then recovery), not an actual process kill during the Google API round trip. The no-duplicate guarantee rests on the `sheets_add_transactions` read-back + existing-key skip, which is tested against the fake Google; it has not been exercised by killing the process during a live append.
 - **Resume through the chat end to end.** `recover()`, the interrupted-task chat notice, and `task_resume` are unit-tested, but a full restart → owner says "resume &lt;id&gt;" → the stored request replays has not been run against a live browser or real model.
+- **The live eval against the real model (Phase 2 §1).** `scripts/live_eval.py` is built and its harness, scoring, injection checks, table and redaction are tested with a scripted model. It has **not** been run against the real Anthropic API from here (no API run was observed), so there is no results table yet and no prompt/tool-description tuning has been done from real failures. The owner runs `uv run python scripts/live_eval.py --out eval_artifacts` and pastes the printed table here. The scoring is deterministic for a given transcript; the model's behaviour on these 20 tasks is unknown until that run.
+- **The spend cap against real spend.** The meter and the hard stop are tested with synthetic costs. Real per-call costs depend on the live API's token usage, which has not been exercised here. `model_budget_usd` defaults to 0 (disabled); set it to turn the cap on.
 
 ## Fixed in this pass
 

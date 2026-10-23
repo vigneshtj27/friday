@@ -332,6 +332,30 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX task_journal_plan ON task_journal(plan_id, step_id);
     """,
+    """
+    -- Durable model-usage meter: one row per model call, so a spend cap survives restarts and spans
+    -- every caller (planner, chat, agent loop). `window_key` is the budget window the call fell in
+    -- (a calendar month 'YYYY-MM', a day 'YYYY-MM-DD', or 'all'); summing cost_usd for the current
+    -- key gives the spend to compare against the cap. No prompt or response text is stored - only the
+    -- model name, the kind of caller, and the cost.
+    CREATE TABLE usage_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        window_key TEXT NOT NULL,
+        model TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        cost_usd REAL NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX usage_ledger_window ON usage_ledger(window_key);
+    -- One row the first time a window crosses the warn threshold, so the 80% warning is sent once per
+    -- window even across restarts.
+    CREATE TABLE usage_notices (
+        window_key TEXT PRIMARY KEY,
+        warned_at TEXT NOT NULL
+    );
+    """,
 ]
 
 

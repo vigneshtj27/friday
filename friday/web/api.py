@@ -74,6 +74,7 @@ def register_api(app: FastAPI, ctx: AppContext, require: Any) -> None:
             "sheets_connected": ctx.sheets.configured,
             "notify": [n.name for n in ctx.notifier.notifiers],
             "model": ctx.settings.model,
+            "usage": ctx.usage.status() if ctx.usage else None,
             "version": build_info(),
             "preflight": {p.id: ctx.prefs.get(f"preflight:{p.id}") for p in ctx.profiles.list()},
             "egress": {p.id: ctx.prefs.get(f"egress:{p.id}") for p in ctx.profiles.list()},

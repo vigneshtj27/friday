@@ -66,6 +66,7 @@ class AppContext:
     onboarding: Any = field(default=None)
     vault_requests: Any = field(default=None)
     tasks: Any = field(default=None)
+    usage: Any = field(default=None)
 
     def portal_link(self, fragment: str = "") -> str:
         return f"{self.settings.public_base_url.rstrip('/')}/portal#{fragment}"
@@ -113,11 +114,15 @@ def build_context(
     gate.notify = notifier.send
     gate.link = lambda a: ctx.portal_link("approvals")
     from friday.jobs import JobRunner
+    from friday.usage import UsageMeter, metered
 
+    ctx.usage = UsageMeter(ctx)
     if llm_factory is None:
         from friday.agent.llm import default_llm
 
         llm_factory = lambda: default_llm(settings)  # noqa: E731
+    # Every model call is metered against the configured spend cap, whatever the caller.
+    llm_factory = metered(llm_factory, ctx.usage, "agent")
     ctx.jobs = JobRunner(ctx, llm_factory)
     from types import SimpleNamespace
 
@@ -150,6 +155,7 @@ def build_context(
         chat_llm_factory = lambda: AnthropicLLM(  # noqa: E731
             settings.model, effort=settings.chat_effort, fallbacks=settings.model_fallbacks
         )
+    chat_llm_factory = metered(chat_llm_factory, ctx.usage, "chat")
     from friday.tools import build_registry
 
     ctx.tools = build_registry(ctx, chat_llm_factory or None)

@@ -12,6 +12,7 @@ from typing import Any
 from friday.agent.llm import LLM, LLMRefusal
 from friday.agent.tools import TOOLS, INTERACTIVE, ToolExecutor, ToolResult
 from friday.runs import RunStore
+from friday.usage import BudgetExceeded
 
 log = logging.getLogger(__name__)
 
@@ -142,6 +143,8 @@ class AgentLoop:
                 resp = await self.llm.complete(SYSTEM_PROMPT, messages, TOOLS)
             except LLMRefusal as e:
                 return out("failed", f"Model declined to continue: {e}")
+            except BudgetExceeded as e:
+                return out("aborted", f"Stopped: {e}")
             self.cost += resp.cost_usd
             self.runs.add_cost(task.run_id, resp.cost_usd)
             messages.append({"role": "assistant", "content": resp.content})
