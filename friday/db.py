@@ -392,6 +392,30 @@ MIGRATIONS: list[str] = [
         UNIQUE (playbook_id, version)
     );
     """,
+    """
+    -- Spend ledger: one row per attempted payment, bound to the approval that authorised it and the
+    -- task it served. outcome: committed | failed | uncertain | refused | denied | void. A failed or
+    -- uncertain payment is never retried automatically (the order page/email is checked and the owner
+    -- asked first). Amounts and labels are redacted; no card number, CVV or full account id is stored.
+    CREATE TABLE spend_ledger (
+        id TEXT PRIMARY KEY,
+        task_id TEXT,
+        run_id TEXT,
+        approval_id TEXT,
+        merchant TEXT NOT NULL,
+        total TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        items TEXT,
+        address_label TEXT,
+        method_label TEXT,
+        order_id TEXT,
+        outcome TEXT NOT NULL,
+        detail TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX spend_ledger_day ON spend_ledger(currency, created_at);
+    """,
 ]
 
 

@@ -32,8 +32,17 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-EFFECTS = ("read", "write", "send", "share", "spend", "publish")
-ALWAYS_APPROVE = {"send", "share", "spend", "publish"}
+# Effect classes (the owner-visible risk of a call):
+#   read          - list, search, read, summarise
+#   write         - private to the owner (own sheet, draft, memory)
+#   share         - another person gains access (write-shared)
+#   send          - a message goes out
+#   spend         - money moves
+#   account_change- a setting, payee, limit or account state changes
+#   publish       - posted somewhere public
+# spend, send, share, account_change and publish always need a per-action owner tap.
+EFFECTS = ("read", "write", "send", "share", "spend", "account_change", "publish")
+ALWAYS_APPROVE = {"send", "share", "spend", "account_change", "publish"}
 
 
 class ToolError(Exception):
