@@ -139,8 +139,16 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def healthz() -> dict:
         from friday.version import build_info
 
-        b = build_info()  # unauthenticated: the short commit and build time only
-        return {"ok": True, "version": b["short"], "built_at": b["built_at"]}
+        b = build_info()  # unauthenticated: only operational facts, never secrets or content
+        last = ctx.db.query_one(
+            "SELECT MAX(finished_at) AS at FROM schedule_runs WHERE outcome IN ('success', 'changed', 'no_change')"
+        )
+        last_run = ctx.db.query_one("SELECT MAX(finished_at) AS at FROM runs WHERE status = 'done'")
+        channels = ctx.notifier.channels() if hasattr(ctx.notifier, "channels") else []
+        return {"ok": True, "version": b["short"], "built_at": b["built_at"],
+                "last_successful_scheduled_run": last["at"] if last else None,
+                "last_successful_run": last_run["at"] if last_run else None,
+                "channels": channels, "model": ctx.settings.model}  # fmt: skip
 
     @app.get("/login")
     async def login_form(next: str = "/") -> HTMLResponse:
