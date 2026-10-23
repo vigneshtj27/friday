@@ -18,12 +18,21 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from friday.util import iso
+
+# A watch that hits one of these has been blocked by the site, not merely errored: retrying every
+# interval would hammer it and get nowhere. The watch is paused and the owner is told once.
+BLOCKED_SIGNAL = re.compile(
+    r"\b(403|forbidden|captcha|recaptcha|hcaptcha|access denied|blocked|are you (a )?(human|robot)|"
+    r"too many requests|rate.?limited|verify you(?:'re| are) human|bot detection|unusual traffic)\b",
+    re.IGNORECASE,
+)
 
 log = logging.getLogger(__name__)
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -34,7 +43,7 @@ class ScheduleError(ValueError):
 
 
 def _utc(dt: datetime) -> datetime:
-    return dt.astimezone(timezone.utc)
+    return dt.astimezone(UTC)
 
 
 def normalise(when: dict[str, Any]) -> dict[str, Any]:
@@ -146,15 +155,15 @@ class Scheduler:
 
     def create(self, kind: str, text: str, when: dict[str, Any], *, notify: str = "always",
                now: datetime | None = None) -> dict[str, Any]:  # fmt: skip
-        if kind not in ("reminder", "job"):
-            raise ScheduleError("kind is reminder or job")
+        if kind not in ("reminder", "job", "brief"):
+            raise ScheduleError("kind is reminder, job or brief")
         if notify not in ("always", "on_change"):
             raise ScheduleError("notify is always or on_change")
         text = " ".join(text.split())[:1000]
         if not text:
             raise ScheduleError("what should it say or do?")
         spec = normalise(when)
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         due = next_run(spec, self.tz, after=now, created=now)
         if due is None or due <= now - timedelta(seconds=5):
             raise ScheduleError("that time is in the past")
@@ -179,11 +188,15 @@ class Scheduler:
     def _public(self, r: dict[str, Any]) -> dict[str, Any]:
         spec = json.loads(r["spec_json"])
         nxt = r["next_run_at"]
-        paused = r["paused_at"] is not None and r["cancelled_at"] is None
+        cancelled = r["cancelled_at"] is not None
+        paused = r["paused_at"] is not None and not cancelled
+        # A one-shot that never fired and is no longer scheduled (a missed/resumed-too-late reminder)
+        # is "expired": it won't fire, but the owner should still see it so they can reset the time.
+        expired = (not cancelled and not paused and nxt is None and r["runs"] == 0 and is_one_shot(spec))
         out = {"id": r["id"], "kind": r["kind"], "text": r["text"], "when": describe(spec),
                "next": None if paused else self._fmt_local(nxt, r["tz"]), "runs": r["runs"],
-               "notify": r.get("notify", "always"), "paused": paused,
-               "active": r["cancelled_at"] is None and nxt is not None and not paused}  # fmt: skip
+               "notify": r.get("notify", "always"), "paused": paused, "expired": expired,
+               "active": not cancelled and nxt is not None and not paused}  # fmt: skip
         if r.get("notify") == "on_change":
             st = self.ctx.db.query_one("SELECT * FROM schedule_state WHERE schedule_id = ?", (r["id"],))
             out["last_checked"] = self._fmt_local(st["last_checked_at"], r["tz"]) if st else None
@@ -193,7 +206,7 @@ class Scheduler:
     def list(self, *, include_done: bool = False) -> list[dict[str, Any]]:
         rows = self.ctx.db.query("SELECT * FROM schedules ORDER BY next_run_at IS NULL, next_run_at")
         out = [self._public(dict(r)) for r in rows]
-        return out if include_done else [s for s in out if s["active"] or s["paused"]]
+        return out if include_done else [s for s in out if s["active"] or s["paused"] or s["expired"]]
 
     def _match(self, query: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         q = query.strip().lower()
@@ -221,7 +234,7 @@ class Scheduler:
         future it re-arms to it; if it has already passed, it is marked expired and NOT fired - the
         owner is told to set a new time. A dated commitment is never silently moved or back-fired.
         """
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         hits = self._match(query, [s for s in self.list() if s["paused"]])
         out = []
         for s in hits:
@@ -274,7 +287,7 @@ class Scheduler:
 
     async def tick(self, now: datetime | None = None) -> list[str]:
         """Fire everything due. Returns the ids fired."""
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         due = self.ctx.db.query(
             "SELECT * FROM schedules WHERE cancelled_at IS NULL AND paused_at IS NULL AND next_run_at IS NOT NULL AND next_run_at <= ?",
             (iso(now),))  # fmt: skip
@@ -285,7 +298,9 @@ class Scheduler:
             self.ctx.db.execute("UPDATE schedules SET next_run_at = ?, last_run_at = ?, runs = runs + 1 WHERE id = ?",
                                 (iso(nxt) if nxt else None, iso(now), r["id"]))  # fmt: skip
             fired.append(r["id"])
-            if r["kind"] == "reminder":
+            if r["kind"] == "brief":
+                await self._emit_brief()
+            elif r["kind"] == "reminder":
                 await self.ctx.notifier.send(f"Reminder: {r['text']}", None)
             else:
                 task = asyncio.create_task(self._run_job(r["id"], r["text"], notify=r["notify"]))
@@ -296,6 +311,17 @@ class Scheduler:
             for t in self.ctx.tasks.due_nudges(iso(now)):
                 await self.ctx.notifier.send(f"Still waiting on you: “{t['request'][:100]}” (task {t['id']}).", None)
         return fired
+
+    async def _emit_brief(self) -> None:
+        """The opt-in daily brief: post it to chat and the channels, or stay silent if nothing changed."""
+        from friday.brief import build_brief
+
+        text = build_brief(self.ctx)
+        if not text:
+            log.info("daily brief: nothing to report; staying silent")
+            return
+        self.ctx.chat.store.add("friday", text)
+        await self._notify_reply(text)
 
     def _lock_for(self, sid: str) -> asyncio.Lock:
         return self._locks.setdefault(sid, asyncio.Lock())
@@ -349,6 +375,10 @@ class Scheduler:
         A failed/blocked/denied run never commits a staged value and keeps the previous good one."""
         now = iso()
         red = self.ctx.redactor
+        if outcome in ("error", "blocked") and self._stop_if_blocked(sid, reply):
+            reply = (reply + "\n\nI've paused this: the site blocked automation (403 / CAPTCHA). I won't keep "
+                     "retrying. Check it yourself, then resume the watch, or let me open it for you in remote view.")
+            rerun_sid = None  # don't offer a re-run of something that's being blocked
         msg = reply if rerun_sid is None else f"{reply}\nReply `run {rerun_sid}` (and approve) to run it now."
         if on_change:
             if outcome == "success":
@@ -398,6 +428,20 @@ class Scheduler:
                 await n.send(text, None)
             except Exception:
                 log.warning("notifier %s failed on a scheduled reply", getattr(n, "name", "?"))
+
+    def _stop_if_blocked(self, sid: str, text: str) -> bool:
+        """A recurring schedule whose run was blocked by the site (403/CAPTCHA) is paused, once, so it
+        stops retrying. Returns True if it paused it this time."""
+        if not BLOCKED_SIGNAL.search(text or ""):
+            return False
+        r = self.ctx.db.query_one("SELECT * FROM schedules WHERE id = ?", (sid,))
+        if r is None or r["cancelled_at"] is not None or r["paused_at"] is not None:
+            return False
+        if is_one_shot(json.loads(r["spec_json"])):
+            return False  # a one-shot won't retry anyway
+        self.ctx.db.execute("UPDATE schedules SET paused_at = ? WHERE id = ? AND paused_at IS NULL", (iso(), sid))
+        self.ctx.audit.record("schedule.stop_blocked", actor="system", target=sid)
+        return True
 
     def _upsert_state(self, sid: str, **cols: Any) -> None:
         if self._state(sid) is None:

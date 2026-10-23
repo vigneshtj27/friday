@@ -35,6 +35,10 @@ class Notifier:
     async def stop(self) -> None:
         pass
 
+    async def verify(self) -> bool:
+        """Send a test and confirm the channel accepted it. Base channels assume success."""
+        return True
+
 
 class LogNotifier(Notifier):
     name = "log"
@@ -60,6 +64,11 @@ class TelegramNotifier(Notifier):
         async with httpx.AsyncClient(timeout=20) as http:
             r = await http.post(f"{self.base}/sendMessage", json={"chat_id": self.chat_id, "text": body})
             r.raise_for_status()
+
+    async def verify(self) -> bool:
+        """A real delivery check: send a test line; the channel is live only if it is accepted."""
+        await self.send("friday: channel test. If you can read this, notifications are working.")
+        return True
 
     async def start(self, on_reply: ReplyHandler) -> None:
         self._task = asyncio.create_task(self._poll(on_reply))
@@ -179,6 +188,24 @@ class MultiNotifier(Notifier):
     async def stop(self) -> None:
         for n in self.notifiers:
             await n.stop()
+
+    def channels(self) -> list[str]:
+        """The external channels in play (not the log, not the built-in chat)."""
+        return [n.name for n in self.notifiers if n.name not in ("log", "chat")]
+
+    async def verify(self) -> dict[str, bool]:
+        """Delivery check: send a test to each external channel and report what got through. Only
+        channels already configured and approved are here - this never enables a new one."""
+        out: dict[str, bool] = {}
+        for n in self.notifiers:
+            if n.name in ("log", "chat"):
+                continue
+            try:
+                out[n.name] = await n.verify()
+            except Exception as e:
+                log.warning("%s delivery check failed: %s", n.name, type(e).__name__)
+                out[n.name] = False
+        return out
 
 
 def build_notifier(settings: Settings, redactor: Redactor, chat: Notifier | None = None) -> MultiNotifier:
