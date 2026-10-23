@@ -80,10 +80,10 @@ def parse_amount(text: str) -> tuple[Decimal, str | None] | None:
     if not t or t in ("-", "--"):
         return None
     hint = None
-    if re.search(r"\bdr\.?$|\bdebit$", t, re.I):
-        hint, t = "debit", re.sub(r"\s*(dr\.?|debit)$", "", t, flags=re.I)
-    elif re.search(r"\bcr\.?$|\bcredit$", t, re.I):
-        hint, t = "credit", re.sub(r"\s*(cr\.?|credit)$", "", t, flags=re.I)
+    if re.search(r"\bdr\.?$|\bdebit$", t, re.IGNORECASE):
+        hint, t = "debit", re.sub(r"\s*(dr\.?|debit)$", "", t, flags=re.IGNORECASE)
+    elif re.search(r"\bcr\.?$|\bcredit$", t, re.IGNORECASE):
+        hint, t = "credit", re.sub(r"\s*(cr\.?|credit)$", "", t, flags=re.IGNORECASE)
     neg = t.startswith("-") or (t.startswith("(") and t.endswith(")")) or t.endswith("-")
     t = re.sub(r"[^\d.,]", "", t)
     if not t:
@@ -119,14 +119,14 @@ def infer_dayfirst(values: list[str], *, default: bool) -> bool:
 # ---- CSV / XLSX ------------------------------------------------------------
 
 HEADER_PATTERNS = {
-    "date": re.compile(r"^(txn |transaction |posting |value |booking )?date$|^date$|^posted", re.I),
-    "description": re.compile(r"description|narration|particulars|details|memo|payee|remarks|transaction$", re.I),
-    "debit": re.compile(r"debit|withdrawal|money out|paid out|dr\b", re.I),
-    "credit": re.compile(r"credit|deposit|money in|paid in|cr\b", re.I),
-    "amount": re.compile(r"^amount|amount$|^value$", re.I),
-    "balance": re.compile(r"balance", re.I),
-    "type": re.compile(r"^(type|dr/cr|cr/dr|debit/credit)$", re.I),
-    "currency": re.compile(r"^currency$|^ccy$", re.I),
+    "date": re.compile(r"^(txn |transaction |posting |value |booking )?date$|^date$|^posted", re.IGNORECASE),
+    "description": re.compile(r"description|narration|particulars|details|memo|payee|remarks|transaction$", re.IGNORECASE),
+    "debit": re.compile(r"debit|withdrawal|money out|paid out|dr\b", re.IGNORECASE),
+    "credit": re.compile(r"credit|deposit|money in|paid in|cr\b", re.IGNORECASE),
+    "amount": re.compile(r"^amount|amount$|^value$", re.IGNORECASE),
+    "balance": re.compile(r"balance", re.IGNORECASE),
+    "type": re.compile(r"^(type|dr/cr|cr/dr|debit/credit)$", re.IGNORECASE),
+    "currency": re.compile(r"^currency$|^ccy$", re.IGNORECASE),
 }
 
 
@@ -161,7 +161,7 @@ def rows_to_transactions(
     dayfirst = infer_dayfirst([r[cols["date"]] for r in rows[header_idx + 1 :] if len(r) > cols["date"]], default=dayfirst)
     out: list[Transaction] = []
     for n, row in enumerate(rows[header_idx + 1 :], start=header_idx + 1):
-        get = lambda k: (row[cols[k]] if 0 <= cols.get(k, -1) < len(row) else "").strip()  # noqa: E731
+        get = lambda k: (row[cols[k]] if 0 <= cols.get(k, -1) < len(row) else "").strip()
         d = parse_date(get("date"), dayfirst=dayfirst) if get("date") else None
         if d is None:
             continue  # subtotal / footer lines
@@ -379,14 +379,16 @@ class TransactionStore:
         return new, len(txns) - new
 
     def _reconcile(self, c: Any, t: Transaction) -> None:
-        """A bank row just landed: mark any matching email-evidence row 'confirmed' so exports
-        never double-write the same charge."""
+        """A bank row just landed: confirm ONE matching email-evidence row (one-to-one), so two
+        same-day same-amount email charges don't both collapse onto a single bank row. A second bank
+        row for the same day/amount confirms the second email row on its own insert."""
         for r in c.execute(
             "SELECT hash, description FROM transactions WHERE status = 'email' AND date = ? AND amount = ?",
             (t.date.isoformat(), str(t.amount)),
         ).fetchall():
             if _desc_overlap(t.description, r["description"]):
                 c.execute("UPDATE transactions SET status = 'confirmed' WHERE hash = ?", (r["hash"],))
+                return  # exactly one email row per bank row
 
     def add_evidence(self, items: list[Transaction], *, evidence_refs: list[str]) -> dict[str, int]:
         """Store email-evidence rows (status='email'). Skips a row when a bank-confirmed charge with
@@ -432,3 +434,24 @@ class TransactionStore:
         sql += " ORDER BY date DESC, raw_ref LIMIT ?"
         params.append(limit)
         return [dict(r) for r in self._db.query(sql, params)]
+
+    def reconcile(self, *, window_days: int = 3, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+        """Match still-PENDING email-evidence rows one-to-one against imported bank rows within a date
+        window, mark the matches confirmed, and report what is left unmatched on each side. Email
+        evidence is a hint; only a real bank row confirms it."""
+        from friday.reconcile import match_one_to_one
+
+        email = self.list(status="email", start=start, end=end)
+        bank = self.list(status="bank", start=start, end=end)
+        res = match_one_to_one(email, bank, window_days=window_days)
+        with self._db.tx() as c:
+            for pair in res["matched"]:
+                c.execute("UPDATE transactions SET status = 'confirmed' WHERE hash = ?", (pair["email"]["hash"],))
+        return {
+            "confirmed": len(res["matched"]),
+            "unmatched_email": [{"date": e["date"], "amount": e["amount"], "description": e["description"]}
+                                for e in res["unmatched_email"]],
+            "unmatched_bank": [{"date": b["date"], "amount": b["amount"], "description": b["description"]}
+                               for b in res["unmatched_bank"]],
+            "note": "email evidence is a hint, not statement truth; only a matching bank row confirms it",
+        }  # fmt: skip
