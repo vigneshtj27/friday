@@ -21,7 +21,12 @@ from friday.agent.snapshot import ElementInfo, Snapshot, locator_for, take_snaps
 from friday.audit import AuditLog
 from friday.files import FileStore
 from friday.runs import RunStore
-from friday.vault.injector import InjectionRefused, InjectionScope, SecretInjector, type_verified
+from friday.vault.injector import (
+    InjectionRefused,
+    InjectionScope,
+    SecretInjector,
+    type_verified,
+)
 from friday.vault.masking import Redactor
 from friday.vault.store import SecretNotFound
 
@@ -371,6 +376,17 @@ class ToolExecutor:
         )
         if decision.verdict == Verdict.DENY:
             return ToolResult(f"Refused by policy: {decision.reason}", is_error=True)
+        if name == "goto":
+            # Part 2: refuse NAVIGATING onto a payment-commit endpoint on a site no tested adapter
+            # claims - stop before the point of no return (a page could self-submit on load), and let
+            # the owner pay in remote view. A supported adapter's own checkout URL is allowed through.
+            from friday.agent.policy import PAY_URL
+            from friday.checkout import SpendRouter
+
+            url = str(args.get("url", ""))
+            router = self.d.spend_router
+            if PAY_URL.search(url) and (router is None or router.adapter_for(url) is None):
+                return ToolResult(SpendRouter.fail_closed_message(url), is_error=True)
         if decision.verdict == Verdict.SPEND:
             # A payment commit never goes through the generic tap. It is routed to a tested checkout
             # adapter + the spend gate (caps, bound approval, ledger), or it fails closed. Either way
@@ -566,7 +582,7 @@ class ToolExecutor:
         except Exception as e:
             # Some sites open the PDF in a viewer tab instead of downloading it.
             for p in [*(set(self.context.pages) - pages_before), self.page]:
-                if re.search(r"\.pdf($|\?)|/pdf|statement", p.url, re.I) and url_allowed(p.url, self.d.policy.ctx.allowed_domains):
+                if re.search(r"\.pdf($|\?)|/pdf|statement", p.url, re.IGNORECASE) and url_allowed(p.url, self.d.policy.ctx.allowed_domains):
                     resp = await self.context.request.get(p.url, timeout=60000)
                     ctype = resp.headers.get("content-type", "")
                     if resp.ok and ("pdf" in ctype or "csv" in ctype or "octet-stream" in ctype):

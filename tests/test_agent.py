@@ -8,7 +8,14 @@ import pytest
 
 from friday.agent.approvals import ApprovalGate
 from friday.agent.policy import ActionPolicy, PolicyContext, Verdict, form_kind
-from friday.capabilities.transactions import Transaction, TransactionStore, parse_amount, parse_date, verify, with_hashes
+from friday.capabilities.transactions import (
+    Transaction,
+    TransactionStore,
+    parse_amount,
+    parse_date,
+    verify,
+    with_hashes,
+)
 from friday.sitenotes import SiteNotes
 from friday.vault.masking import Redactor
 
@@ -143,7 +150,7 @@ def test_site_notes_dedupe_stale_and_redaction(ctx):
 @pytest.mark.parametrize(
     "text,expected",
     [("1,234.50", (Decimal("1234.50"), None)), ("1,234.50 Dr", (Decimal("1234.50"), "debit")), ("(12.00)", (Decimal("12.00"), "debit")),
-     ("-5", (Decimal("5"), "debit")), ("1.234,56", (Decimal("1234.56"), None)), ("300 CR", (Decimal("300"), "credit")), ("", None)],
+     ("-5", (Decimal(5), "debit")), ("1.234,56", (Decimal("1234.56"), None)), ("300 CR", (Decimal(300), "credit")), ("", None)],
 )
 def test_parse_amount(text, expected):
     assert parse_amount(text) == expected
@@ -191,3 +198,56 @@ def test_date_order_inferred_from_data_not_locale():
     csv_data = b"Date,Narration,Withdrawal,Deposit,Balance\n05/03/2026,A,10.00,,90.00\n28/03/2026,B,,5.00,95.00\n"
     tx = parse_csv(csv_data, source="s", raw_ref="f", currency="INR", dayfirst=False)
     assert [t.date.isoformat() for t in tx] == ["2026-03-05", "2026-03-28"]
+
+
+# ---- Part 1: money-commit recognition across every action path (defence-in-depth corpus) ---------
+
+PAYMENT_FORM = {"hasPayment": True, "fieldTypes": ["text", "text", "submit"],
+                "fieldNames": ["card number", "cvv"], "text": "Card payment"}
+PLAIN_FORM = {"hasPassword": False, "hasOtp": False, "fieldTypes": ["text", "submit"],
+              "fieldNames": ["notes"], "text": "A form"}
+
+PAY_LABELS = ["Place your order", "Place order", "Pay now", "Make payment", "Confirm order",
+              "Complete booking", "Submit payment", "Buy now", "Subscribe & pay", "Review and pay"]
+
+
+@pytest.mark.parametrize("label", PAY_LABELS)
+def test_pay_label_button_is_spend(policy, label):
+    assert policy.decide("click", {"ref": "e1"}, el(label, type_="button")).verdict == Verdict.SPEND
+
+
+@pytest.mark.parametrize("label", PAY_LABELS)
+def test_pay_label_on_domain_link_is_spend(policy, label):
+    d = policy.decide("click", {"ref": "e1"}, el(label, href="https://www.mybank.example/buy"))
+    assert d.verdict == Verdict.SPEND
+
+
+@pytest.mark.parametrize("label", PAY_LABELS)
+def test_pay_label_submit_is_spend(policy, label):
+    assert policy.decide("click", {"ref": "e1"}, el(label, form=PLAIN_FORM, submit=True)).verdict == Verdict.SPEND
+
+
+def test_enter_in_a_payment_form_is_spend(policy):
+    assert policy.decide("press", {"key": "Enter"}, el("card number", form=PAYMENT_FORM)).verdict == Verdict.SPEND
+
+
+def test_submit_in_a_payment_form_is_spend_regardless_of_label(policy):
+    # structural detection: a card-number field makes it a commit even with an innocuous button label
+    assert policy.decide("click", {"ref": "e1"}, el("Continue", form=PAYMENT_FORM, submit=True)).verdict == Verdict.SPEND
+    assert policy.decide("click", {"ref": "e1"}, el("Submit", form=PAYMENT_FORM)).verdict == Verdict.SPEND
+
+
+def test_on_domain_link_to_a_payment_url_is_spend(policy):
+    d = policy.decide("click", {"ref": "e1"}, el("Finish", href="https://www.mybank.example/checkout/pay"))
+    assert d.verdict == Verdict.SPEND
+
+
+# negative controls: ordinary shopping still works, and account changes keep their existing gate
+@pytest.mark.parametrize("label", ["Add to cart", "Apply coupon", "Track order"])
+def test_ordinary_shopping_actions_are_not_spend(policy, label):
+    assert policy.decide("click", {"ref": "e1"}, el(label, type_="button")).verdict == Verdict.ALLOW
+
+
+def test_change_address_keeps_its_approval_gate(policy):
+    v = policy.decide("click", {"ref": "e1"}, el("Change address", type_="button")).verdict
+    assert v == Verdict.NEEDS_APPROVAL  # unchanged: a non-commit account change stays a tap, not SPEND

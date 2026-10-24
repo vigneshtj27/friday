@@ -9,10 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from friday.checkout import MockShopAdapter, SpendRouter
-from friday.spend import SpendIntent
 
 from .test_tools import approve_next
 
@@ -100,7 +97,7 @@ async def test_a_total_change_before_commit_voids_and_does_not_pay(ctx):
             ctx.gate.decide(ctx.gate.pending()[0].id, True)
             break
         await asyncio.sleep(0.01)
-    ok, msg = await task
+    ok, _ = await task
     assert not ok and "#place-order" not in page.clicked  # never committed the changed order
     assert ctx.spend.ledger.list()[0]["outcome"] == "void"
 
@@ -121,7 +118,7 @@ async def test_denied_tap_does_not_pay(ctx):
     page = FakePage(URL, ORDER)
     task = asyncio.create_task(_router(ctx).run(page, task_id="t", run_id="r"))
     await approve_next(ctx, False)
-    ok, msg = await task
+    ok, _ = await task
     assert not ok and "#place-order" not in page.clicked
     assert ctx.spend.ledger.list()[0]["outcome"] == "denied"
 
@@ -171,6 +168,24 @@ async def test_executor_fails_closed_on_a_payment_without_a_router(ctx):
     res = await ex._gate("click", {"ref": "e1"}, _pay_button())
     assert res is not None and res.is_error and "remote view" in res.content
     assert not ctx.gate.pending()  # never a generic approval card for money
+
+
+async def test_executor_refuses_navigating_onto_a_payment_url_on_an_unsupported_site(ctx):
+    # Part 2: a page that self-submits can't be intercepted after the fact, so navigating onto a
+    # payment-commit endpoint that no adapter claims is refused BEFORE the goto.
+    from friday.agent.policy import ActionPolicy, PolicyContext
+    from friday.agent.tools import ExecutorDeps, ToolExecutor
+    from friday.vault.injector import InjectionScope
+
+    deps = ExecutorDeps(
+        policy=ActionPolicy(PolicyContext(("shop.example", "localhost", "mock-shop.local"), ctx.redactor)),
+        gate=ctx.gate, spend_router=_router(ctx), injector=ctx.injector,
+        scope=InjectionScope("p", "secret:p/", ("shop.example",)), files=ctx.files, runs=ctx.runs,
+        audit=ctx.audit, redactor=ctx.redactor, downloads_dir=ctx.settings.data_dir, run_id="r", profile_id="p",
+    )  # fmt: skip
+    ex = ToolExecutor(None, FakePage("https://shop.example/account", {}), deps)
+    res = await ex._gate("goto", {"url": "https://shop.example/checkout/pay"}, None)
+    assert res is not None and res.is_error and "remote view" in res.content
 
 
 async def test_executor_routes_a_payment_through_the_gate(ctx):

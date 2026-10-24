@@ -27,10 +27,27 @@ class Verdict(StrEnum):
     DENY = "deny"
 
 
-# Words that mean the control itself commits a payment (not just navigates toward one).
+# Best-effort recognition that a control itself commits a payment (not just navigates toward one).
+# This is DEFENCE-IN-DEPTH, not the boundary: the boundary is the capability restriction in the
+# executor (a SPEND verdict can only run through a tested checkout adapter, never a generic tap), so a
+# commit this list misses on an unsupported page is still refused once structurally detected (a card
+# form) or, failing that, never executed via the generic approval path. No word list proves coverage
+# of arbitrary sites; this one only widens what gets routed to the gate rather than tapped.
 PAY_COMMIT = re.compile(
-    r"\b(pay( now)?|place (the )?order|buy( now)?|purchase|checkout|check out|"
-    r"complete (the )?(order|purchase|payment)|confirm (and )?pay)\b",
+    r"\b("
+    r"pay( now)?|payment|make (a )?payment|submit (the )?payment|proceed to (pay|payment|checkout)|"
+    r"buy( now)?|purchase|checkout|check ?out|"
+    r"place (your |the |my )?order|"
+    r"confirm (and )?(pay|order|purchase|payment|booking)|"
+    r"complete (your |the |my )?(order|booking|purchase|payment)|"
+    r"review and pay|subscribe (and|&) pay|pay (and|&) subscribe"
+    r")\b",
+    re.IGNORECASE,
+)
+# A URL whose path is clearly a payment-commit endpoint. Used to refuse NAVIGATING onto a
+# self-submitting checkout on an unsupported site, before the point of no return.
+PAY_URL = re.compile(
+    r"/(pay|payment|placeorder|place-order|checkout/(pay|confirm|complete)|order/(confirm|complete|pay)|billing/pay)(/|$|\?)",
     re.IGNORECASE,
 )
 
@@ -79,14 +96,16 @@ DESTRUCTIVE_LINK = re.compile(
     re.IGNORECASE,
 )
 FILTER_FIELD_TYPES = {"date", "month", "week", "datetime-local", "select", "radio", "checkbox", "search", "number"}
-LOGIN_HINT = re.compile(r"(user|login|log ?in|sign ?in|email|e-mail|customer|client|member|account|id|phone|mobile|otp|code|pin)", re.I)
-DATE_HINT = re.compile(r"(date|from|to|start|end|period|month|year|day)", re.I)
+LOGIN_HINT = re.compile(r"(user|login|log ?in|sign ?in|email|e-mail|customer|client|member|account|id|phone|mobile|otp|code|pin)", re.IGNORECASE)
+DATE_HINT = re.compile(r"(date|from|to|start|end|period|month|year|day)", re.IGNORECASE)
 
 
 def form_kind(form: dict[str, Any] | None) -> str:
     """auth | filter | search | other | none"""
     if not form:
         return "none"
+    if form.get("hasPayment"):
+        return "payment"  # a card-number/CVV field -> a money commit, whatever the button says
     if form.get("hasPassword") or form.get("hasOtp"):
         return "auth"
     types = [t for t in form.get("fieldTypes", []) if t not in ("submit", "button", "reset", "image")]
@@ -97,15 +116,15 @@ def form_kind(form: dict[str, Any] | None) -> str:
     free_text = [t for t in types if t in ("text", "email", "tel", "textarea", "")]
     if (
         len(free_text) <= 1
-        and re.search(r"\b(log ?in|sign ?in|log ?on|sign-in)\b", text, re.I)
+        and re.search(r"\b(log ?in|sign ?in|log ?on|sign-in)\b", text, re.IGNORECASE)
         and LOGIN_HINT.search(names)
     ):
         return "auth"  # username-first step of a multi-step login
     if free_text and all(DATE_HINT.search(n) for n in form.get("fieldNames", []) if n) and re.search(
-        r"(statement|transaction|history|period|date)", text, re.I
+        r"(statement|transaction|history|period|date)", text, re.IGNORECASE
     ):
         return "filter"
-    if len(types) == 1 and types[0] in ("text", "search") and re.search(r"search|find|query", text, re.I):
+    if len(types) == 1 and types[0] in ("text", "search") and re.search(r"search|find|query", text, re.IGNORECASE):
         return "search"
     return "other"
 
@@ -168,6 +187,8 @@ class ActionPolicy:
         if el.get("href") and not str(el["href"]).startswith("javascript:"):
             if not url_allowed(el["href"], self.ctx.allowed_domains):
                 return Decision(Verdict.DENY, f"link leaves the allowlist ({urlparse(el['href']).hostname})")
+            if PAY_COMMIT.search(name) or PAY_URL.search(str(el["href"])):
+                return Decision(Verdict.SPEND, f"link {name!r} commits a payment")  # a one-click purchase link
             if DESTRUCTIVE_LINK.search(name):
                 return Decision(Verdict.NEEDS_APPROVAL, f"link {name!r} may commit a change by itself")
             return Decision(Verdict.ALLOW, "allowlisted link")
@@ -175,14 +196,14 @@ class ActionPolicy:
             return self._submit(el, f"submit {name!r}")
         if el.get("type") in ("checkbox", "radio") and RISKY.search(name):
             kind = form_kind(el.get("form"))
-            if kind in ("auth",) and re.search(r"remember|trust|keep me", name, re.I):
+            if kind in ("auth",) and re.search(r"remember|trust|keep me", name, re.IGNORECASE):
                 return Decision(Verdict.ALLOW, "remember-this-device on sign-in")
             return Decision(Verdict.NEEDS_APPROVAL, f"checkbox {name!r} gives consent or changes a setting")
-        if PAY_COMMIT.search(name):
+        if PAY_COMMIT.search(name) or form_kind(el.get("form")) == "payment":
             return Decision(Verdict.SPEND, f"control {name!r} commits a payment")
         if RISKY.search(name):
             kind = form_kind(el.get("form"))
-            if kind == "auth" and AUTH_WORDS.search(name) and not re.search(r"pay|transfer|payee|beneficiar|order|buy", name, re.I):
+            if kind == "auth" and AUTH_WORDS.search(name) and not re.search(r"pay|transfer|payee|beneficiar|order|buy", name, re.IGNORECASE):
                 return Decision(Verdict.ALLOW, "sign-in control")
             return Decision(Verdict.NEEDS_APPROVAL, f"control {name!r} may change something")
         return Decision(Verdict.ALLOW, "non-mutating control")
@@ -190,9 +211,9 @@ class ActionPolicy:
     def _submit(self, el: dict[str, Any], what: str) -> Decision:
         name = el.get("name") or ""
         kind = form_kind(el.get("form"))
-        if PAY_COMMIT.search(name):
+        if kind == "payment" or PAY_COMMIT.search(name):
             return Decision(Verdict.SPEND, f"{what} commits a payment")
-        if re.search(r"pay|transfer|payee|beneficiar|order|buy|purchase|delete|close account", name, re.I):
+        if re.search(r"pay|transfer|payee|beneficiar|order|buy|purchase|delete|close account", name, re.IGNORECASE):
             return Decision(Verdict.NEEDS_APPROVAL, f"{what} looks like a money or account change")
         if kind == "auth":
             return Decision(Verdict.ALLOW, f"{what} in a sign-in form")
@@ -216,6 +237,6 @@ class ActionPolicy:
             return Decision(Verdict.ALLOW, "date/filter field")
         if kind == "auth" and LOGIN_HINT.search(hint):
             return Decision(Verdict.ALLOW, "sign-in field")
-        if kind == "none" and re.search(r"search|find|filter", hint, re.I):
+        if kind == "none" and re.search(r"search|find|filter", hint, re.IGNORECASE):
             return Decision(Verdict.ALLOW, "standalone search box")
         return Decision(Verdict.NEEDS_APPROVAL, f"typing free text into {hint or 'a field'!r} may send data")

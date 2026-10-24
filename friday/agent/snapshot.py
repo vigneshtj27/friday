@@ -87,6 +87,15 @@ WALKER_JS = r"""
       method: (form.getAttribute('method') || 'get').toLowerCase(),
       hasPassword: inputs.some(i => i.type === 'password'),
       hasOtp: inputs.some(i => i.autocomplete === 'one-time-code' || OTP_RE.test([i.name, i.id, i.placeholder, i.getAttribute('aria-label')].join(' '))),
+      // Structural payment-form signal: a card-number / CVV / expiry field, by autocomplete token or
+      // by name/placeholder. This does not depend on the button's label, so an oddly-labelled pay
+      // button in a card form is still recognised as a money commit.
+      hasPayment: inputs.some(i => {
+        const ac = (i.autocomplete || '').toLowerCase();
+        if (['cc-number', 'cc-csc', 'cc-exp', 'cc-exp-month', 'cc-exp-year'].includes(ac)) return true;
+        const hint = [i.name, i.id, i.placeholder, i.getAttribute('aria-label')].filter(Boolean).join(' ').toLowerCase();
+        return /\b(card ?number|cardnumber|cc ?number|credit ?card|debit ?card|cvv|cvc|csc|security code|card expir)\b/.test(hint);
+      }),
       fieldTypes: inputs.map(i => i.tagName.toLowerCase() === 'input' ? (i.type || 'text').toLowerCase() : i.tagName.toLowerCase()),
       fieldNames: inputs.map(i => clean([i.name, i.id, i.placeholder, i.getAttribute('aria-label')].filter(Boolean).join(' '), 60)),
       text: clean(form.innerText, 300),
