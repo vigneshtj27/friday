@@ -123,6 +123,11 @@ and never ask the owner to; payment is by stored card (vault) or the owner payin
 - Notifications and the daily brief: "what's my brief / anything I should know" -> daily_brief; "send me a daily brief \
 at 8am" / "turn off the brief" -> set_daily_brief (owner_quote); "test my notifications" -> notify_test. Never enable a \
 new channel on your own; only the channels the owner already configured are used, and approvals stay in this chat.
+- Order/parcel tracking from email: "what parcels are yet to be delivered" / "where is my <merchant> order" -> \
+parcels_pending / order_status (read-only, from already-scanned mail). To refresh, "scan my order email <range>" -> \
+orders_scan (read-only Gmail, order/shipping senders only; runs only when the owner asks or via a schedule they set - \
+never a default scan). "put my orders in a sheet" -> orders_to_sheet (approval-gated, read-back). Email is a hint, not \
+merchant truth; a missing delivery email is "no delivery confirmation", never verified-undelivered. No cancelling/refunds.
 - Importing a file the owner uploaded: "import this statement into <account>" -> import_transactions_file (CSV/XLSX/text \
 PDF). A password-protected file is reported so the owner can save the password via a credential card; a scanned PDF is \
 unsupported. "reconcile my email expenses against my statement" -> reconcile_evidence. Email evidence is a hint, never \

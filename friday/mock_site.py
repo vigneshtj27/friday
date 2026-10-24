@@ -153,6 +153,50 @@ def create_mock_app() -> FastAPI:
     async def root():
         return page("MockBank", "".join(f"<p><a href=/s/{s}/login>{s}</a></p>" for s in sorted(SCENARIOS)))
 
+    # ---- mock shop checkout (for the tested checkout adapter, F-18 Part 2) ----
+    shop_orders: list[dict] = []
+
+    def _checkout_html(total: str = "1,499.00", *, change_after_ms: int | None = None, self_submit: bool = False) -> str:
+        # The MockShopAdapter reads these ids; #place-order posts to /shop/confirm.
+        timer = (f"<script>setTimeout(()=>{{document.getElementById('order-total').textContent='9,999.00';}}, "
+                 f"{change_after_ms});</script>") if change_after_ms else ""  # fmt: skip
+        auto = "<script>document.getElementById('cform').submit();</script>" if self_submit else ""
+        return (f"<!doctype html><html><head><title>Checkout</title><meta charset=utf-8></head><body>"
+                f"<h1 id=merchant>Mock Shop</h1>"
+                f"<div id=order-id>SHOP-ORD-7788</div>"
+                f"<div id=order-items>Blue Mug, Steel Kettle</div>"
+                f"<div id=order-total>{total}</div><div id=order-currency>INR</div>"
+                f"<div id=delivery-address>Home, 221B</div><div id=payment-method>Visa ending 4242</div>"
+                f"<form id=cform method=post action=/shop/confirm>"
+                f"<button id=place-order type=submit>Place your order</button></form>{timer}{auto}</body></html>")
+
+    @app.get("/shop/checkout")
+    async def shop_checkout():
+        return HTMLResponse(_checkout_html())
+
+    @app.get("/shop/checkout-changes")
+    async def shop_checkout_changes():
+        return HTMLResponse(_checkout_html(change_after_ms=120))
+
+    @app.get("/shop/checkout-autosubmit")
+    async def shop_checkout_auto():
+        return HTMLResponse(_checkout_html(self_submit=True))
+
+    @app.post("/shop/confirm")
+    async def shop_confirm():
+        shop_orders.append({"order_id": "SHOP-ORD-7788", "at": time.time()})
+        return HTMLResponse("<!doctype html><html><head><title>Order confirmed</title></head><body>"
+                            "<h1>Thank you for your order</h1><div id=order-confirmed>SHOP-ORD-7788</div></body></html>")
+
+    @app.get("/shop/orders")
+    async def shop_orders_list():
+        return shop_orders
+
+    @app.get("/shop/pay")
+    async def shop_pay_unsupported():
+        # a payment endpoint the MockShopAdapter does NOT claim (no /checkout in the path)
+        return HTMLResponse(_checkout_html())
+
     @app.get("/mock/outbox")
     async def get_outbox():
         return outbox[-5:]

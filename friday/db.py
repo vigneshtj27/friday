@@ -421,6 +421,30 @@ MIGRATIONS: list[str] = [
     -- back to its schedule and recorded as a durable 'interrupted' schedule_runs row on recovery.
     ALTER TABLE plans ADD COLUMN schedule_id TEXT;
     """,
+    """
+    -- Order/shipment tracking (F-18): one durable, redacted row per dated event parsed from an email
+    -- (order confirmation, shipment, out-for-delivery, delivery, cancellation, return, refund). The
+    -- full event stream is kept; current per-item state is resolved in code (friday/capabilities/
+    -- orders.py). An email is untrusted content: only these fields are stored, nothing executes.
+    -- Dedupe is on message_id (one email -> at most one event), so a re-scan adds nothing new.
+    CREATE TABLE order_events (
+        message_id TEXT PRIMARY KEY,
+        order_key TEXT NOT NULL,
+        merchant TEXT NOT NULL,
+        order_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        source TEXT NOT NULL,
+        items_json TEXT NOT NULL DEFAULT '[]',
+        carrier TEXT,
+        tracking_id TEXT,
+        amount TEXT,
+        currency TEXT,
+        refund_status TEXT,
+        event_date TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX order_events_key ON order_events(order_key, event_date);
+    """,
 ]
 
 

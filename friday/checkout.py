@@ -13,6 +13,7 @@ fake page in tests; the live page is the same shape.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -126,7 +127,12 @@ class SpendRouter:
             self.spend_gate.uncertain(decision.ledger_id, f"commit errored: {type(e).__name__}")
             return (False, "the pay action errored after your approval; I can't tell whether it went through, so I've "
                            "marked it uncertain and won't retry. Check the order page or your email.")  # fmt: skip
-        order_id = await adapter.confirmation(page)
+        order_id = None
+        for _ in range(12):  # a real checkout navigates to its confirmation; poll briefly for it
+            order_id = await adapter.confirmation(page)
+            if order_id:
+                break
+            await asyncio.sleep(0.25)
         if order_id:
             self.spend_gate.committed(decision.ledger_id, order_id=order_id)
             return (True, f"Paid {intent.currency} {intent.amount()} to {intent.merchant} (order {order_id}).")

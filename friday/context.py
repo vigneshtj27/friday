@@ -69,6 +69,7 @@ class AppContext:
     usage: Any = field(default=None)
     playbooks: Any = field(default=None)
     spend: Any = field(default=None)
+    orders: Any = field(default=None)
 
     def portal_link(self, fragment: str = "") -> str:
         return f"{self.settings.public_base_url.rstrip('/')}/portal#{fragment}"
@@ -146,6 +147,9 @@ def build_context(
     from friday.spend import SpendGate
 
     ctx.spend = SpendGate(ctx)
+    from friday.orders import OrderStore
+
+    ctx.orders = OrderStore(ctx)
     from friday.preflight import Preflight
 
     ctx.preflight = Preflight(ctx)
