@@ -114,6 +114,27 @@ def test_match_respects_the_date_window_and_merchant():
     assert match_one_to_one(email, wrong_merchant, window_days=3)["matched"] == []
 
 
+# ---- the chat upload endpoint (Part 5) ----------------------------------------------------------
+
+
+def test_upload_endpoint_stores_a_file_for_import(ctx):
+    from fastapi.testclient import TestClient
+
+    from friday.web.app import create_app
+    from tests.conftest import TEST_PASSWORD
+
+    with TestClient(create_app(ctx), base_url="http://testserver") as c:
+        c.post("/login", data={"password": TEST_PASSWORD}, follow_redirects=False)
+        r = c.post("/api/upload", files={"file": ("oct.csv", CSV, "text/csv")})
+        assert r.status_code == 200
+        fid = r.json()["id"]
+        # a non-statement type is refused, and oversize is refused
+        assert c.post("/api/upload", files={"file": ("notes.txt", b"hi", "text/plain")}).status_code == 415
+        assert c.post("/api/upload", files={"file": ("big.csv", b"x" * 8_000_001, "text/csv")}).status_code == 413
+    # the stored file is importable by id
+    assert ctx.files.meta(fid) is not None and ctx.files.meta(fid).kind == "upload"
+
+
 async def test_reconcile_through_the_store_marks_confirmed(ctx):
     # an email hint, then a bank import a day later within the window -> confirmed, not duplicated
     ctx.transactions.add_evidence(

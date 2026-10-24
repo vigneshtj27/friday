@@ -8,7 +8,7 @@ import hmac
 import io
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
@@ -189,6 +189,22 @@ def register_api(app: FastAPI, ctx: AppContext, require: Any) -> None:
         disp = "inline" if inline or meta.mime.startswith("image/") else "attachment"
         safe = meta.name.replace('"', "")
         return Response(ctx.files.read(file_id), media_type=meta.mime, headers={"Content-Disposition": f'{disp}; filename="{safe}"'})
+
+    @app.post("/api/upload", dependencies=deps)
+    async def upload(file: UploadFile = File(...)):
+        """Accept a statement file dropped in the chat so import_transactions_file can read it. Read-
+        only of the file, 8 MB cap, CSV/XLSX/text-PDF only; stored encrypted like any other file."""
+        name = (file.filename or "upload").strip()
+        lower = name.lower()
+        if not lower.endswith((".csv", ".xlsx", ".xlsm", ".pdf")):
+            raise HTTPException(415, "only CSV, XLSX or PDF statement files can be uploaded")
+        data = await file.read(9_000_000)  # read a little past the cap so we can reject oversize
+        if len(data) > 8_000_000:
+            raise HTTPException(413, "that file is larger than the 8 MB limit")
+        if not data:
+            raise HTTPException(400, "the file is empty")
+        stored = ctx.files.put(data, name=name, kind="upload", mime=file.content_type or None)
+        return {"id": stored.id, "name": stored.name, "size": stored.size, "mime": stored.mime}
 
     @app.get("/api/transactions", dependencies=deps)
     async def transactions(source: str | None = None, start: str | None = None, end: str | None = None, format: str = "json"):
