@@ -136,6 +136,8 @@ TOOLS: list[dict[str, Any]] = [
     ),
 ]
 INTERACTIVE = {"goto", "click", "type", "press", "select", "download_file"}
+# Actions that can move the run to a new page/state and so warrant a landing check afterwards.
+PAGE_CHANGING = {"goto", "click", "press", "select"}
 
 # A submit that the page sends by script (fetch/XHR, then a redirect) never navigates while the
 # button spins, so load-state waits return at once. These are the requests that mean "still sending".
@@ -144,6 +146,24 @@ SUBMIT_WAIT_SECONDS = 20.0  # longest wait for a submit to finish; long-polls an
 SUBMIT_QUIET_SECONDS = 1.0  # no submit-type request in flight for this long = the submit has finished
 
 FOCUSED_JS = "() => document.activeElement && document.activeElement.getAttribute('data-friday-ref')"
+# A card-number / CVV / expiry field anywhere on the page (same structural signal as the snapshot's
+# form hasPayment, but page-wide). Defence-in-depth landing signal, not a boundary.
+PAY_FIELD_JS = r"""() => {
+  const inputs = Array.from(document.querySelectorAll('input')).filter(i => i.type !== 'hidden');
+  return inputs.some(i => {
+    const ac = (i.autocomplete || '').toLowerCase();
+    if (['cc-number','cc-csc','cc-exp','cc-exp-month','cc-exp-year'].includes(ac)) return true;
+    const hint = [i.name, i.id, i.placeholder, i.getAttribute('aria-label')].filter(Boolean).join(' ').toLowerCase();
+    return /\b(card ?number|cardnumber|cc ?number|credit ?card|debit ?card|cvv|cvc|csc|security code|card expir)\b/.test(hint);
+  });
+}"""
+# An order-confirmation state on the page. TELEMETRY ONLY: used to notice that money may already have
+# moved without the gate, never to allow a commit.
+CONFIRM_JS = r"""() => {
+  if (document.querySelector('#order-confirmed, [data-order-confirmed], .order-confirmation, .order-confirmed')) return true;
+  const t = (document.body ? document.body.innerText : '').slice(0, 4000).toLowerCase();
+  return /\b(order (confirmed|placed|complete)|thank you for your (order|purchase)|payment (successful|received|confirmed)|your order number)\b/.test(t);
+}"""
 MARK_SECRET_JS = "(ref) => { const el = document.querySelector(`[data-friday-ref=\"${ref}\"]`); if (el) el.setAttribute('data-friday-secret', '1'); }"
 
 # HTML tables and ARIA tables/grids (many sites draw lists of transactions with divs and roles).
@@ -207,6 +227,7 @@ class ExecutorDeps:
     step_screenshots: bool = True
     spend_router: Any = None  # friday.checkout.SpendRouter; None means payments always fail closed
     task_id: str | None = None
+    notifier: Any = None  # for the breach-signal alert (telemetry); None = no external alert
 
 
 def _safe_name(name: str) -> str:
@@ -363,6 +384,117 @@ class ToolExecutor:
             png, name="step.jpg", kind=kind, profile_id=self.d.profile_id, run_id=self.d.run_id, mime="image/jpeg"
         ).id
 
+    async def _route_spend(self) -> ToolResult:
+        """A money commit: run it through a tested checkout adapter + the spend gate, or fail closed.
+        The raw action is always suppressed (this returns a result), so money only moves via the gate."""
+        from friday.checkout import SpendRouter
+
+        router = self.d.spend_router
+        if router is None or router.adapter_for(self.page.url) is None:
+            return ToolResult(SpendRouter.fail_closed_message(self.page.url), is_error=True)
+        ok, msg = await router.run(self.page, task_id=self.d.task_id, run_id=self.d.run_id)
+        return ToolResult(msg, is_error=not ok)
+
+    async def _page_has_payment(self) -> bool:
+        """Structural: a card-number/CVV field anywhere on the current page. Best-effort, not a boundary."""
+        try:
+            return bool(await isolated.evaluate(self.page.main_frame, PAY_FIELD_JS))
+        except Exception:
+            return False
+
+    async def _page_confirmation(self) -> bool:
+        """TELEMETRY ONLY: does the current page look like an order confirmation / receipt?"""
+        from friday.agent.policy import CONFIRMATION_URL
+
+        if CONFIRMATION_URL.search(self.page.url or ""):
+            return True
+        try:
+            return bool(await isolated.evaluate(self.page.main_frame, CONFIRM_JS))
+        except Exception:
+            return False
+
+    async def _payment_context(self) -> bool:
+        """A payment-commit surface: a payment-endpoint URL, or a card form on the page. Defence-in-
+        depth, applied per action - NOT prevention; a click can commit before this is ever evaluated."""
+        from friday.agent.policy import PAY_URL
+
+        return bool(PAY_URL.search(self.page.url or "")) or await self._page_has_payment()
+
+    def _adapter_claims_here(self) -> bool:
+        r = self.d.spend_router
+        return bool(r and r.adapter_for(self.page.url))
+
+    async def _landing_check(self) -> ToolResult | None:
+        """After a page-changing action, look at where we landed. DEFENCE-IN-DEPTH, not a boundary: it
+        can only stop FURTHER actions - the action just taken may already have committed. Two signals:
+          * an order-confirmation reached with no gate involvement for this run -> a BREACH telemetry
+            row + owner alert (money may already have moved; this detects, it does not prevent);
+          * an unsupported payment-commit surface -> halt the run and offer remote view."""
+        if await self._page_confirmation() and not self._spend_rows_for_run():
+            await self._record_breach()
+            return ToolResult(
+                "Stopped: this page shows an order/payment confirmation, but no payment went through friday's "
+                "spend gate on this run. Money may already have moved outside friday's control. I've recorded it "
+                "and alerted the owner. I won't take any further action here; check your order and card yourself.",
+                is_error=True, finish={"status": "blocked", "summary": "unauthorised confirmation observed (breach signal)"},
+            )  # fmt: skip
+        if not self._adapter_claims_here() and await self._payment_context():
+            from friday.checkout import SpendRouter
+
+            return ToolResult(
+                "Stopped: this looks like a payment page and this checkout isn't supported for automatic payment. "
+                + SpendRouter.fail_closed_message(self.page.url),
+                is_error=True, finish={"status": "blocked", "summary": "landed on an unsupported payment surface"},
+            )  # fmt: skip
+        return None
+
+    def _spend_rows_for_run(self) -> bool:
+        """Did any spend-ledger row (reserved/authorised/committed/...) get written for this run? If
+        yes, a confirmation is expected and is not a breach."""
+        router = self.d.spend_router
+        if router is None or not getattr(router, "spend_gate", None):
+            return False
+        try:
+            return any(r.get("run_id") == self.d.run_id for r in router.spend_gate.ledger.list(limit=200))
+        except Exception:
+            return False
+
+    async def _record_breach(self) -> None:
+        """Write an uncertain ledger row from what the page shows and alert the owner. TELEMETRY
+        BACKSTOP ONLY - this detects money that already moved; it is not prevention."""
+        router = self.d.spend_router
+        detail = f"BREACH: confirmation observed at {self.page.url} with no gate on run {self.d.run_id}"
+        try:
+            if router is not None and getattr(router, "spend_gate", None):
+                adapter = router.adapter_for(self.page.url)
+                intent = await adapter.read_intent(self.page) if adapter else None
+                if intent is not None:
+                    router.spend_gate.ledger._record(intent, "uncertain", task_id=self.d.task_id,
+                                                     run_id=self.d.run_id, approval_id=None, detail=detail)  # fmt: skip
+                else:
+                    from friday.spend import SpendIntent
+
+                    stub = SpendIntent(merchant=urlparse(self.page.url).hostname or "unknown", total="0", currency="",
+                                       order_id="")  # fmt: skip
+                    router.spend_gate.ledger._record(stub, "uncertain", task_id=self.d.task_id,
+                                                     run_id=self.d.run_id, approval_id=None, detail=detail)  # fmt: skip
+        except Exception:
+            log.warning("could not record breach ledger row")
+        try:
+            self.d.audit.record("spend.breach", actor="system", target=self.d.profile_id, run=self.d.run_id, url=self.page.url)
+            self.d.runs.step(self.d.run_id, "breach", result=detail)
+        except Exception:
+            pass
+        if self.d.notifier is not None:
+            try:
+                await self.d.notifier.send(
+                    "Possible unauthorised payment: a confirmation page appeared during a run without any payment "
+                    "going through friday's spend gate. Check your order and card. (friday did not authorise this.)",
+                    None,
+                )
+            except Exception:
+                log.warning("could not alert the owner about a spend breach")
+
     async def _gate(self, name: str, args: dict[str, Any], el: ElementInfo | None) -> ToolResult | None:
         decision: Decision = self.d.policy.decide(name, args, el.data if el else None)
         self.d.audit.record(
@@ -391,13 +523,13 @@ class ToolExecutor:
             # A payment commit never goes through the generic tap. It is routed to a tested checkout
             # adapter + the spend gate (caps, bound approval, ledger), or it fails closed. Either way
             # the raw click is suppressed (this returns a result), so money only moves via the gate.
-            router = self.d.spend_router
-            if router is None or router.adapter_for(self.page.url) is None:
-                from friday.checkout import SpendRouter
-
-                return ToolResult(SpendRouter.fail_closed_message(self.page.url), is_error=True)
-            ok, msg = await router.run(self.page, task_id=self.d.task_id, run_id=self.d.run_id)
-            return ToolResult(msg, is_error=not ok)
+            return await self._route_spend()
+        if decision.verdict == Verdict.NEEDS_APPROVAL and await self._payment_context():
+            # Ambiguity in a payment context (payment-endpoint URL or a card form on the page): a
+            # generic tap bypasses the caps, the bound fingerprint, the re-verify and the ledger, so it
+            # is NOT a terminal outcome here. Route to the adapter + gate, or fail closed. Outside a
+            # payment context, ambiguous controls keep their normal approval tap (below).
+            return await self._route_spend()
         if decision.verdict == Verdict.NEEDS_APPROVAL:
             shot = await self._masked_screenshot("approval")
             form = (el.form or {}) if el else {}
@@ -440,12 +572,19 @@ class ToolExecutor:
                 return blocked
             await self._pace()
         try:
-            return await handler(args, el)
+            result = await handler(args, el)
         except (InjectionRefused, SecretNotFound) as e:
             return ToolResult(f"Secret not filled: {e}", is_error=True)
         except Exception as e:
             msg = str(e).splitlines()[0][:300]
             return ToolResult(f"{name} failed: {type(e).__name__}: {msg}", is_error=True)
+        # Landing check (defence-in-depth, NOT a boundary): after a page-changing action, see where we
+        # landed. A commit may already have happened; this can only stop FURTHER actions. See _landing_check.
+        if name in PAGE_CHANGING and result.finish is None:
+            halt = await self._landing_check()
+            if halt is not None:
+                return halt
+        return result
 
     # ---- tools ----------------------------------------------------------
 

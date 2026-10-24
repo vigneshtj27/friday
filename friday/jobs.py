@@ -198,6 +198,7 @@ class JobRunner:
             policy=ActionPolicy(PolicyContext(nav_domains, ctx.redactor)),
             gate=ctx.gate,
             spend_router=SpendRouter(ctx.spend) if ctx.spend else None,
+            notifier=ctx.notifier,
             injector=ctx.injector,
             scope=InjectionScope(profile.id, prefix, nav_domains),
             files=ctx.files,

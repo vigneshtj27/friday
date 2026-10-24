@@ -140,17 +140,25 @@ def test_fail_closed_message_mentions_remote_view():
 # ---- the executor routes a SPEND verdict through the gate (not the generic tap) ------------------
 
 
-def _deps(ctx, spend_router):
+class FakeNotifier:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, text, url=None, *, meta=None):
+        self.sent.append(text)
+
+
+def _deps(ctx, spend_router, *, domains=("localhost", "mock-shop.local"), notifier=None, run_id="r"):
     from friday.agent.policy import ActionPolicy, PolicyContext
     from friday.agent.tools import ExecutorDeps
     from friday.vault.injector import InjectionScope
 
     return ExecutorDeps(
-        policy=ActionPolicy(PolicyContext(("localhost", "mock-shop.local"), ctx.redactor)),
-        gate=ctx.gate, spend_router=spend_router, injector=ctx.injector,
+        policy=ActionPolicy(PolicyContext(tuple(domains), ctx.redactor)),
+        gate=ctx.gate, spend_router=spend_router, notifier=notifier, injector=ctx.injector,
         scope=InjectionScope("mybank.me", "secret:mybank/me/", ("localhost",)),
         files=ctx.files, runs=ctx.runs, audit=ctx.audit, redactor=ctx.redactor,
-        downloads_dir=ctx.settings.data_dir, run_id="r", profile_id="mybank.me",
+        downloads_dir=ctx.settings.data_dir, run_id=run_id, profile_id="mybank.me",
     )  # fmt: skip
 
 
@@ -200,3 +208,100 @@ async def test_executor_routes_a_payment_through_the_gate(ctx):
     assert res is not None and not res.is_error and "ORD1" in res.content
     assert "#place-order" in page.clicked
     assert ctx.spend.ledger.list()[0]["outcome"] == "committed"
+
+
+# ---- follow-up 3: landing checks, ambiguity-in-payment-context, breach telemetry -----------------
+
+def _exec(ctx, page, *, router=None, notifier=None, run_id="r"):
+    from friday.agent.tools import ToolExecutor
+
+    return ToolExecutor(None, page, _deps(ctx, router if router is not None else _router(ctx),
+                                          domains=("localhost", "mock-shop.local", "shop.example"),
+                                          notifier=notifier, run_id=run_id))  # fmt: skip
+
+
+async def test_landing_on_payment_url_unsupported_halts(ctx):
+    ex = _exec(ctx, FakePage("https://shop.example/checkout/pay", {}))
+    ex._page_has_payment = lambda: _async(False)
+    ex._page_confirmation = lambda: _async(False)
+    res = await ex._landing_check()
+    assert res is not None and res.finish == {"status": "blocked", "summary": "landed on an unsupported payment surface"}
+    assert "remote view" in res.content
+
+
+async def test_landing_on_card_form_unsupported_halts(ctx):
+    ex = _exec(ctx, FakePage("https://shop.example/step2", {}))
+    ex._page_has_payment = lambda: _async(True)   # a card field is on the page
+    ex._page_confirmation = lambda: _async(False)
+    res = await ex._landing_check()
+    assert res is not None and res.finish["status"] == "blocked"
+
+
+async def test_landing_on_ordinary_page_continues(ctx):
+    ex = _exec(ctx, FakePage("https://shop.example/cart", {}))
+    ex._page_has_payment = lambda: _async(False)
+    ex._page_confirmation = lambda: _async(False)
+    assert await ex._landing_check() is None
+
+
+async def test_supported_adapter_checkout_landing_not_halted(ctx):
+    ex = _exec(ctx, FakePage(URL, {}))  # URL is the mock-shop /checkout, which the adapter claims
+    ex._page_has_payment = lambda: _async(True)
+    ex._page_confirmation = lambda: _async(False)
+    assert await ex._landing_check() is None
+
+
+async def test_ambiguous_control_in_payment_context_fails_closed_not_tapped(ctx):
+    # a generic NEEDS_APPROVAL submit (no pay word, plain form) on a payment-URL page, no adapter
+    from friday.agent.snapshot import ElementInfo
+
+    ex = _exec(ctx, FakePage("https://shop.example/checkout/pay", {}), router=_router(ctx))
+    ex._page_has_payment = lambda: _async(False)  # context comes from the PAY_URL
+    el = ElementInfo("e1", 0, {"name": "Submit", "isSubmit": True,
+                               "form": {"fieldTypes": ["text", "submit"], "fieldNames": ["notes"], "text": "A form"}})
+    res = await ex._gate("click", {"ref": "e1"}, el)
+    assert res is not None and res.is_error and "remote view" in res.content
+    assert not ctx.gate.pending()  # NOT a generic approval tap
+
+
+async def test_ambiguous_control_outside_payment_context_keeps_the_tap(ctx):
+    from friday.agent.snapshot import ElementInfo
+
+    ex = _exec(ctx, FakePage("https://shop.example/account", {}), router=_router(ctx))
+    ex._page_has_payment = lambda: _async(False)
+    el = ElementInfo("e1", 0, {"name": "Submit", "isSubmit": True,
+                               "form": {"fieldTypes": ["text", "submit"], "fieldNames": ["notes"], "text": "A form"}})
+    task = asyncio.create_task(ex._gate("click", {"ref": "e1"}, el))
+    await approve_next(ctx, True)  # a normal approval card appeared (today's behaviour preserved)
+    assert await task is None  # approved -> _gate lets the action proceed
+
+
+async def test_breach_signal_recorded_and_owner_alerted(ctx):
+    notifier = FakeNotifier()
+    ex = _exec(ctx, FakePage("https://shop.example/thank-you", {}), router=_router(ctx), notifier=notifier, run_id="runX")
+    ex._page_has_payment = lambda: _async(False)
+    ex._page_confirmation = lambda: _async(True)  # a confirmation page, but no gate ran this run
+    res = await ex._landing_check()
+    assert res is not None and res.finish["status"] == "blocked"
+    rows = [r for r in ctx.spend.ledger.list() if r["run_id"] == "runX"]
+    assert rows and rows[0]["outcome"] == "uncertain" and rows[0]["detail"].startswith("BREACH")
+    assert notifier.sent and "unauthorised payment" in notifier.sent[0].lower()
+
+
+async def test_confirmation_with_a_gate_row_is_not_a_breach(ctx):
+    # a legitimately gated+committed payment this run -> a confirmation page is expected, not a breach
+    ctx.prefs.set("spend_caps", {})
+    page = FakePage(URL, {**ORDER, "_confirm_on_commit": "ORD1"})
+    task = asyncio.create_task(_router(ctx).run(page, task_id="t", run_id="runY"))
+    await approve_next(ctx, True)
+    await task  # committed row written for runY
+    ex = _exec(ctx, FakePage("https://shop.example/thank-you", {}), notifier=FakeNotifier(), run_id="runY")
+    ex._page_has_payment = lambda: _async(False)
+    ex._page_confirmation = lambda: _async(True)
+    assert await ex._landing_check() is None  # not a breach: a gate row exists for this run
+
+
+def _async(value):
+    async def _f():
+        return value
+    return _f()

@@ -50,6 +50,13 @@ PAY_URL = re.compile(
     r"/(pay|payment|placeorder|place-order|checkout/(pay|confirm|complete)|order/(confirm|complete|pay)|billing/pay)(/|$|\?)",
     re.IGNORECASE,
 )
+# A URL that looks like an order-confirmation / receipt page. Used only as a TELEMETRY BACKSTOP to
+# notice a payment that completed without going through the gate (e.g. a self-submitting page) - it
+# is not prevention and never establishes a safe commit.
+CONFIRMATION_URL = re.compile(
+    r"/(order[-_]?confirm(ation|ed)?|thank[-_]?you|thankyou|receipt|order[-_]?complete|purchase[-_]?complete|confirmation)(/|$|\?)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
