@@ -31,14 +31,49 @@ def test_refs_and_checks():
     results = {"s1": {"messages": [{"thread_id": "t1"}], "stored": {"new": 3}}, "s2": {"appended": 3, "ok": True}}
     assert resolve({"t": {"$ref": "s1.messages.0.thread_id"}, "n": [1, {"$ref": "s1.stored.new"}]}, results) == {"t": "t1", "n": [1, 3]}
     assert lookup(results, "s1.result.stored.new") == 3
-    assert check(results["s2"], chk("appended", "eq", {"$ref": "s1.stored.new"}), results)[0]
+    assert check(results["s2"], chk("appended", "eq", {"$ref": "s1.stored.new"}), results)[:3] == (True, "appended = 3 (expected eq 3)", True)
     assert check(results["s2"], chk("ok", "true"), results)[0]
-    ok, detail = check(results["s2"], chk("appended", "gt", 5), results)
-    assert not ok and "expected gt 5" in detail
-    assert not check(results["s2"], chk("missing", "nonempty"), results)[0]
+    ok, detail, evaluable = check(results["s2"], chk("appended", "gt", 5), results)
+    assert not ok and evaluable and "expected gt 5" in detail  # evaluated, value just didn't pass
+    # a check against a field the result doesn't have: failed, but NOT evaluable -> never fails a step
+    miss_ok, _, miss_eval = check(results["s2"], chk("missing", "nonempty"), results)
+    assert not miss_ok and miss_eval is False
+
+
+def test_check_evaluable_on_real_tool_shapes():
+    """Per-tool regression: a check against a field a tool's result does NOT carry must come back
+    evaluable=False (so the executor never fails the step), while a field it does carry evaluates."""
+    # (tool-shaped result, present-field check, absent-field check the planner wrongly authored)
+    samples = [
+        ({"spreadsheets": [{"id": "x"}]}, chk("spreadsheets", "nonempty"), chk("ok", "true")),
+        ({"appended": 2, "ok": True, "verified": ["read back 2"]}, chk("appended", "gt", 1), chk("args.when", "nonempty")),
+        ({"imported": 3, "already_known": 0}, chk("imported", "ge", 1), chk("ok", "true")),
+        ({"open": [], "count": 0}, chk("count", "ge", 0), chk("rows", "nonempty")),
+        ({"draft_id": "d1"}, chk("draft_id", "nonempty"), chk("sent", "true")),
+    ]
+    for result, present, absent in samples:
+        ok, _, evaluable = check(result, present, {})
+        assert ok and evaluable, f"present-field check should pass for {result}"
+        miss_ok, _, miss_eval = check(result, absent, {})
+        assert not miss_ok and miss_eval is False, f"absent-field check must be unevaluable for {result}"
 
 
 # ---- Phase 1 acceptance, through the chat ---------------------------------------------------------
+
+
+async def test_unverifiable_check_does_not_block_a_successful_step(g):
+    """A plan that checks a field the tool doesn't return (the live 'no ok in result' / 'args.when'
+    defect) must still finish: the action succeeded, the check is just 'not independently verified'."""
+    ctx, _ = g
+    attach(ctx, PlanLLM([plan(step("sheets_list",
+        checks=[chk("ok", "true"), chk("args.when", "nonempty", says="when is an object")]),
+        goal="List your sheets")], reports=["You have one spreadsheet: Expenses 2026."]))  # fmt: skip
+    await ctx.chat.owner_says("What sheets do I have?")
+    await settle(ctx)
+    msg = last_friday(ctx)
+    assert "Expenses 2026" in msg
+    assert ctx.db.query_one("SELECT status FROM plans")["status"] == "done"  # not blocked/failed
+    assert not ctx.chat.assistant.planner.current  # the plan finished, nothing stuck
 
 
 async def test_what_sheets_do_i_have(g):

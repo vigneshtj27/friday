@@ -155,11 +155,17 @@ def create_mock_app() -> FastAPI:
 
     # ---- mock shop checkout (for the tested checkout adapter, F-18 Part 2) ----
     shop_orders: list[dict] = []
+    shop_state = {"total": "1,499.00"}  # the live total; a test mutates it via POST /shop/mutate-total
 
-    def _checkout_html(total: str = "1,499.00", *, change_after_ms: int | None = None, self_submit: bool = False) -> str:
+    def _checkout_html(total: str = "1,499.00", *, change_after_ms: int | None = None,
+                       self_submit: bool = False, live: bool = False) -> str:  # fmt: skip
         # The MockShopAdapter reads these ids; #place-order posts to /shop/confirm.
         timer = (f"<script>setTimeout(()=>{{document.getElementById('order-total').textContent='9,999.00';}}, "
                  f"{change_after_ms});</script>") if change_after_ms else ""  # fmt: skip
+        # live: poll the server's current total and reflect it in the DOM, so a test can change the total
+        # deterministically (after the approval card appears, before it taps) rather than racing a timer.
+        poll = ("<script>setInterval(async()=>{try{const r=await fetch('/shop/current-total');"
+                "document.getElementById('order-total').textContent=(await r.text());}catch(e){}},40);</script>") if live else ""
         auto = "<script>document.getElementById('cform').submit();</script>" if self_submit else ""
         return (f"<!doctype html><html><head><title>Checkout</title><meta charset=utf-8></head><body>"
                 f"<h1 id=merchant>Mock Shop</h1>"
@@ -168,7 +174,7 @@ def create_mock_app() -> FastAPI:
                 f"<div id=order-total>{total}</div><div id=order-currency>INR</div>"
                 f"<div id=delivery-address>Home, 221B</div><div id=payment-method>Visa ending 4242</div>"
                 f"<form id=cform method=post action=/shop/confirm>"
-                f"<button id=place-order type=submit>Place your order</button></form>{timer}{auto}</body></html>")
+                f"<button id=place-order type=submit>Place your order</button></form>{timer}{poll}{auto}</body></html>")
 
     @app.get("/shop/checkout")
     async def shop_checkout():
@@ -177,6 +183,29 @@ def create_mock_app() -> FastAPI:
     @app.get("/shop/checkout-changes")
     async def shop_checkout_changes():
         return HTMLResponse(_checkout_html(change_after_ms=120))
+
+    @app.get("/shop/checkout-live")
+    async def shop_checkout_live():
+        # renders the current total and keeps #order-total in sync with /shop/current-total
+        return HTMLResponse(_checkout_html(shop_state["total"], live=True))
+
+    @app.get("/shop/current-total")
+    async def shop_current_total():
+        return Response(shop_state["total"], media_type="text/plain")
+
+    @app.post("/shop/mutate-total")
+    async def shop_mutate_total(total: str = "9,999.00"):
+        # a test calls this after the spend approval card appears and before it taps approve, so the
+        # pre-commit re-verify deterministically reads a different total and voids the approval.
+        shop_state["total"] = total
+        return {"total": total}
+
+    @app.post("/shop/reset")
+    async def shop_reset():
+        # per-test isolation: the server (and so the mock-shop state) is reused across tests
+        shop_orders.clear()
+        shop_state["total"] = "1,499.00"
+        return {"ok": True}
 
     @app.get("/shop/checkout-autosubmit")
     async def shop_checkout_auto():

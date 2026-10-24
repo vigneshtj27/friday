@@ -90,6 +90,17 @@ class FileStore:
         params.append(limit)
         return [StoredFile(**dict(r)) for r in self._db.query(sql, params)]
 
+    def delete(self, file_id: str) -> StoredFile | None:
+        """Delete one stored file (blob + row) and audit it. Returns the removed file's meta, or None
+        if there was no such file. The caller decides what is deletable; this just does it."""
+        meta = self.meta(file_id)
+        if meta is None:
+            return None
+        (self.root / file_id).unlink(missing_ok=True)
+        self._db.execute("DELETE FROM files WHERE id = ?", (file_id,))
+        self._audit.record("file.delete", target=file_id, name=meta.name, kind=meta.kind, size=meta.size)
+        return meta
+
     def delete_for_profile(self, profile_id: str) -> int:
         rows = self._db.query("SELECT id FROM files WHERE profile_id = ?", (profile_id,))
         for r in rows:

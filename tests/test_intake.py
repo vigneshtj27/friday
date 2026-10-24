@@ -135,6 +135,65 @@ def test_upload_endpoint_stores_a_file_for_import(ctx):
     assert ctx.files.meta(fid) is not None and ctx.files.meta(fid).kind == "upload"
 
 
+# ---- delete_file: owner uploads only, approval-carded, audited (Part 1.3) ------------------------
+
+
+async def test_delete_uploaded_file_after_the_tap(ctx):
+    import asyncio
+
+    from .test_tools import approve_next
+
+    f = _put(ctx, CSV, "friday-test-upload.csv")
+    call = Call(ctx=ctx, owner_text="delete that test file I uploaded", plan_id="p1")
+    task = asyncio.create_task(ctx.tools.call("delete_file", {"file": "friday-test-upload"}, call))
+    await approve_next(ctx, True)  # deleting always needs the owner's tap
+    out = await task
+    assert out["deleted"] == "friday-test-upload.csv"
+    assert ctx.files.meta(f.id) is None  # blob + row gone
+    assert ctx.audit.list(action_prefix="file.delete")  # the deletion is recorded in the audit log
+
+
+async def test_delete_refuses_a_file_the_owner_did_not_upload(ctx):
+    # a downloaded statement is not an owner upload: refused outright, no approval card, file kept
+    f = ctx.files.put(CSV, name="downloaded-statement.csv", kind="download", mime="text/csv")
+    call = Call(ctx=ctx, owner_text="delete the downloaded statement", plan_id="p1")
+    with pytest.raises(ToolError, match="only delete files you uploaded"):
+        await ctx.tools.call("delete_file", {"file": "downloaded-statement"}, call)
+    assert ctx.gate.pending() == [] and ctx.files.meta(f.id) is not None
+
+
+async def test_delete_denied_keeps_the_file(ctx):
+    import asyncio
+
+    from friday.tools.base import ApprovalDenied
+
+    from .test_tools import approve_next
+
+    f = _put(ctx, CSV, "keep-me.csv")
+    call = Call(ctx=ctx, owner_text="delete keep-me", plan_id="p1")
+    task = asyncio.create_task(ctx.tools.call("delete_file", {"file": "keep-me"}, call))
+    await approve_next(ctx, False)
+    with pytest.raises(ApprovalDenied):
+        await task
+    assert ctx.files.meta(f.id) is not None  # a denied tap leaves the file in place
+
+
+def test_chat_page_has_a_wired_upload_control(ctx):
+    # the live defect was that the upload endpoint worked but the chat UI had no control reaching it
+    from fastapi.testclient import TestClient
+
+    from friday.web.app import create_app
+    from tests.conftest import TEST_PASSWORD
+
+    with TestClient(create_app(ctx), base_url="http://testserver") as c:
+        c.post("/login", data={"password": TEST_PASSWORD}, follow_redirects=False)
+        page = c.get("/chat").text
+        assert 'id="attach"' in page and 'id="file"' in page  # the control exists on the page
+        assert 'accept=".csv,.xlsx,.xlsm,.pdf"' in page  # limited to statement types
+        js = c.get("/static/chat.js").text
+        assert "/api/upload" in js and "fileInput.onchange" in js  # and it is wired to the endpoint
+
+
 async def test_reconcile_through_the_store_marks_confirmed(ctx):
     # an email hint, then a bank import a day later within the window -> confirmed, not duplicated
     ctx.transactions.add_evidence(

@@ -69,7 +69,8 @@ class OrdersScan(Tool):
 def _summarise(o: dict[str, Any]) -> dict[str, Any]:
     return {"merchant": o["merchant"], "order_id": o["order_id"], "placed_at": o["placed_at"],
             "open_items": [{"name": i["name"], "state": i["state"], "conflict": i["conflict"]} for i in o["open_items"]],
-            "refunds": o["refunds"], "returns": o["returns"], "last_evidence": o["last_evidence"]}  # fmt: skip
+            "refunds": o["refunds"], "returns": o["returns"], "notes": o.get("notes") or [],
+            "last_evidence": o["last_evidence"]}  # fmt: skip
 
 
 class ParcelsPending(Tool):
@@ -78,6 +79,7 @@ class ParcelsPending(Tool):
                    "and their state (not shipped / in transit / partially delivered / conflicting), with when the mail "
                    "was last scanned. Answers \"what parcels are yet to be delivered?\". Read-only.")
     schema = {"type": "object", "properties": {}}
+    untrusted_output = True  # merchant/item names and notes come from email content
 
     async def run(self, args: dict[str, Any], call: Call) -> Any:
         ctx = call.ctx
@@ -92,6 +94,7 @@ class OrderStatus(Tool):
     name = "order_status"
     description = "Status of one order by merchant or order id, item by item, from the dated email evidence. Read-only."
     schema = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+    untrusted_output = True  # merchant/item names and notes come from email content
 
     async def run(self, args: dict[str, Any], call: Call) -> Any:
         hits = call.ctx.orders.find(str(args["query"]))

@@ -95,7 +95,10 @@ sheets) over opening a browser; a browser_run takes minutes.
 email, a name from a list), set fill to a one-line instruction and put the known arguments in args_json.
 - Give each step checks that code can verify against its result: e.g. {"path": "ok", "op": "true"}, \
 {"path": "appended", "op": "eq", "value_json": "{\\"$ref\\": \\"s1.stored.new\\"}"}. Writes to sheets end with their \
-read-back fields checked (ok, found_after). Totals come from table_compute or transactions_query, never your own sums.
+read-back fields checked (ok, found_after). Totals come from table_compute or transactions_query, never your own sums. \
+Only check a field the tool's result actually returns (most return their own verified[] lines and a count, not an \
+"ok" or your args); a check against a field the result doesn't contain can't be verified, so it is reported as \
+"not independently verified" - it never on its own fails a step or blocks the task.
 - "Last month" is the previous calendar month; "this month"/"Oct so far" runs from the 1st to today. Card activity \
 for a current or recent month: browser_run kind fetch_activity with account_type card. Billed past periods: \
 fetch_statement.
@@ -209,18 +212,23 @@ def _num(x: Any) -> float | None:
         return None
 
 
-def check(result: Any, chk: dict[str, Any], results: dict[str, Any]) -> tuple[bool, str]:
-    """Evaluate one success check in code. Returns (passed, detail)."""
+def check(result: Any, chk: dict[str, Any], results: dict[str, Any]) -> tuple[bool, str, bool]:
+    """Evaluate one success check in code. Returns (passed, detail, evaluable).
+
+    evaluable is False when the check refers to a result field the tool simply does not return (a plan
+    authored a check against a field that isn't in this tool's output). That is a check-authoring gap,
+    not an action failure: the caller records it as "not independently verified" rather than failing the
+    step and raising a false "Blocked". A tool reporting ok=false is caught separately, before checks."""
     try:
         actual = lookup({"_": result}, "_." + chk["path"]) if chk["path"] not in ("", ".") else result
     except PlanError as e:
-        return False, str(e).replace("'_.", "'")
+        return False, str(e).replace("'_.", "'"), False  # the field isn't in the result: can't verify
     expected: Any = None
     if chk.get("value_json") not in (None, ""):
         try:
             expected = resolve(json.loads(chk["value_json"]), results)
         except (json.JSONDecodeError, PlanError) as e:
-            return False, f"bad expected value: {e}"
+            return False, f"bad expected value: {e}", False
     op = chk["op"]
     if op == "true":
         ok = actual is True
@@ -237,7 +245,7 @@ def check(result: Any, chk: dict[str, Any], results: dict[str, Any]) -> tuple[bo
     else:
         a, b = _num(actual), _num(expected)
         ok = a is not None and b is not None and {"gt": a > b, "ge": a >= b, "lt": a < b, "le": a <= b}[op]
-    return ok, f"{chk['path']} = {json.dumps(actual, default=_jsonable)[:80]}" + (f" (expected {op} {expected})" if op not in ("true", "false", "nonempty") else "")
+    return ok, f"{chk['path']} = {json.dumps(actual, default=_jsonable)[:80]}" + (f" (expected {op} {expected})" if op not in ("true", "false", "nonempty") else ""), True
 
 
 def _short(x: Any, n: int = 6000) -> str:
@@ -499,13 +507,19 @@ class Planner:
                 rec.status, rec.detail = "failed", _short({k: result[k] for k in list(result)[:12]}, 300)
                 self._save(state)
                 return ToolError(f"step {s['id']} ({s['tool']}) reported ok=false: {rec.detail}")
-            failed = []
+            failed, unverifiable = [], []
             for chk in s.get("checks") or []:
-                ok, detail = check(result, chk, results)
+                ok, detail, evaluable = check(result, chk, results)
                 if ok:
                     rec.verified.append(chk.get("says") or detail)
+                elif not evaluable:
+                    # the check named a field this tool's result doesn't carry: can't verify, but the
+                    # action itself succeeded, so don't fail the step (that produced false "Blocked" cards)
+                    unverifiable.append(f"{chk.get('says') or chk['path']}: {detail}")
                 else:
                     failed.append(f"{chk.get('says') or chk['path']}: {detail}")
+            if unverifiable:
+                state.events.append({"step": s["id"], "note": "could not verify: " + "; ".join(unverifiable)})
             if isinstance(result, dict):
                 rec.verified += [str(v) for v in result.get("verified", [])]
             if failed:

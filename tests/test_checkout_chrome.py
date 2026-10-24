@@ -31,6 +31,14 @@ def shop():
         yield server
 
 
+@pytest.fixture(autouse=True)
+def _reset_shop(shop):
+    # the server is module-scoped and reused, so shop_orders / the live total carry across tests;
+    # reset them before each test (fixes the full-file ordering failure of the unsupported-URL test).
+    httpx.post(shop.url("/shop/reset"))
+    yield
+
+
 @pytest.fixture
 def ectx(tmp_path):
     s = Settings(_env_file=None, data_dir=tmp_path / "data", volume_encrypted_assert=True, display_backend="auto",
@@ -80,17 +88,36 @@ async def test_real_dom_approve_commit_confirm(ectx, shop):
 
 
 async def test_real_dom_void_on_total_change(ectx, shop):
+    # The void LOGIC is already proven deterministically by the non-Chrome fake-page tests; this test
+    # proves the same wiring against a real DOM. We drive the timing ourselves (rather than racing a
+    # page timer): the checkout-live page keeps #order-total in sync with the server, and the approver
+    # changes the total AFTER the spend card appears and BEFORE it taps, so the pre-commit re-verify is
+    # guaranteed to read a different total and void.
     pid = _shop_profile(ectx, shop)
     run_id = ectx.runs.create("manual", pid, {})
     async with ectx.profiles.open(pid, purpose="test") as op:
         page = await op.session.page()
-        await page.goto(shop.url("/shop/checkout-changes"))  # #order-total mutates ~120ms after load
+        await page.goto(shop.url("/shop/checkout-live"))
         ex = ectx.jobs._executor(op, page, run_id, HeuristicLLM())
         await ex.start()
         ref = await _place_order_ref(ex)
-        approver = asyncio.create_task(_approve_all(ectx))
+
+        async def mutate_then_approve():
+            for _ in range(500):  # wait for the spend approval card
+                if ectx.gate.pending():
+                    break
+                await asyncio.sleep(0.02)
+            httpx.post(shop.url("/shop/mutate-total"), params={"total": "9,999.00"})
+            for _ in range(250):  # let the live page reflect the new total before we approve
+                if "9,999" in (await page.inner_text("#order-total")):
+                    break
+                await asyncio.sleep(0.02)
+            for a in ectx.gate.pending():
+                ectx.gate.decide(a.id, approve=True)
+
+        approver = asyncio.create_task(mutate_then_approve())
         res = await ex.run("click", {"ref": ref})
-        approver.cancel()
+        await approver
     assert res.is_error  # the total changed before submit -> approval void, not paid
     assert httpx.get(shop.url("/shop/orders")).json() == []
     assert ectx.spend.ledger.list()[0]["outcome"] == "void"

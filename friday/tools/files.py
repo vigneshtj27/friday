@@ -149,6 +149,48 @@ class FilesRead(Tool):
         return {"name": name, "text": (text or "")[:30000], "truncated": len(text or "") > 30000}
 
 
+class DeleteFile(Tool):
+    name = "delete_file"
+    description = ("Delete a file the owner uploaded in the chat (CSV/XLSX/PDF). Owner-uploaded files only - "
+                   "it will not touch downloaded statements, Drive copies or run screenshots. Needs the owner's "
+                   "tap, and the deletion is recorded in the audit log. Use for \"delete that test file I uploaded\".")
+    schema = {"type": "object", "properties": {
+        "file": {"type": "string", "description": "the uploaded file's id or name"},
+    }, "required": ["file"]}  # fmt: skip
+    effect = "write"  # a destructive local change: approval() below makes it always need the owner's tap
+
+    @staticmethod
+    def _find(ctx: Any, ref: str) -> Any:
+        """Resolve an UPLOADED file by id or name. Uploads only (kind == 'upload'): never a statement
+        friday downloaded, a Drive copy or a screenshot."""
+        ref = (ref or "").strip()
+        meta = ctx.files.meta(ref)
+        if meta is not None and meta.kind == "upload":
+            return meta
+        uploads = [f for f in ctx.files.list(kind="upload", limit=200)]
+        matches = [f for f in uploads if ref and ref.lower() in f.name.lower()]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ToolError(f"more than one uploaded file matches {ref!r}; name the exact file or give its id")
+        raise ToolError(f"no uploaded file matches {ref!r}. I can only delete files you uploaded in the chat, "
+                        "not downloaded statements, Drive copies or screenshots.")
+
+    def approval(self, args: dict[str, Any], call: Call) -> str | None:
+        # Resolve now so a missing / non-upload target fails fast with a clear error and never shows an
+        # approval card; a real uploaded file produces the card text naming exactly what will be deleted.
+        meta = self._find(call.ctx, str(args.get("file", "")))
+        return f"permanently delete your uploaded file \"{meta.name}\" ({meta.size} bytes)"
+
+    async def run(self, args: dict[str, Any], call: Call) -> Any:
+        meta = self._find(call.ctx, str(args["file"]))
+        removed = call.ctx.files.delete(meta.id)
+        if removed is None:
+            raise ToolError("that file was already gone")
+        return {"deleted": removed.name, "file_id": removed.id,
+                "verified": [f"deleted uploaded file \"{removed.name}\" and recorded it in the audit log"]}  # fmt: skip
+
+
 class TableCompute(Tool):
     name = "table_compute"
     description = (

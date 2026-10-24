@@ -146,6 +146,63 @@ def test_no_delivery_email_is_not_verified_undelivered():
     assert o["items"][0]["delivered_on"] is None
 
 
+# ---- resolver fails CLOSED, not open, on unparseable / itemless closing events ------------------
+
+
+def test_inline_partial_delivery_leaves_the_other_item_open():
+    # The delivery names its item mid-sentence (not on its own line). It must parse as a Blue Mug
+    # delivery - NOT as an itemless event that closes the whole order.
+    o = _order([
+        _mail("auto-confirm@amazon.in", "Order #IN1 confirmed", "1 x Blue Mug\n1 x Steel Kettle\nOrder total: INR 900", "c", (2026, 10, 1)),
+        _mail("track@bluedart.com", "Delivered - Order #IN1", "Good news: 1 x Blue Mug from your order #IN1 was delivered.", "d", (2026, 10, 4)),
+    ])
+    states = {i["name"]: i["state"] for i in o["items"]}
+    assert states["Blue Mug"] == "delivered"
+    assert states["Steel Kettle"] == "not_shipped"  # the other parcel is still open, not hidden
+    assert o["open"] is True
+
+
+def test_itemless_delivery_of_multi_item_order_does_not_close_it():
+    # A delivery email whose items don't parse at all must not be spread across every item of a
+    # 2-item order - that is the direction that hides a missing parcel.
+    o = _order([
+        _mail("auto-confirm@amazon.in", "Order #UNK1 confirmed", "1 x Blue Mug\n1 x Steel Kettle\nOrder total: INR 900", "c", (2026, 10, 1)),
+        _mail("track@bluedart.com", "Your package was delivered - Order #UNK1", "Your package has been delivered. Thank you.", "d", (2026, 10, 4)),
+    ])
+    states = {i["name"]: i["state"] for i in o["items"]}
+    assert states["Blue Mug"] == "not_shipped" and states["Steel Kettle"] == "not_shipped"
+    assert o["open"] is True
+    assert o["notes"] and "didn't say which" in o["notes"][0]
+
+
+def test_itemless_cancellation_of_two_item_order_does_not_cancel_both():
+    o = _order([
+        _mail("noreply@flipkart.com", "Order #CX1 placed", "1 x Blue Mug\n1 x Steel Kettle\nOrder total: INR 900", "c", (2026, 10, 1)),
+        _mail("noreply@flipkart.com", "Cancellation confirmed - Order #CX1", "Your cancellation has been confirmed.", "x", (2026, 10, 2)),
+    ])
+    states = {i["name"]: i["state"] for i in o["items"]}
+    assert states["Blue Mug"] != "cancelled" and states["Steel Kettle"] != "cancelled"
+    assert o["open"] is True
+    assert o["notes"] and "cancellation" in o["notes"][0]
+
+
+def test_itemless_delivery_of_single_item_order_still_closes_it():
+    # With only one item there is nothing to confuse, so an itemless delivery may still apply.
+    o = _order([
+        _mail("auto-confirm@amazon.in", "Order #ONE1 confirmed", "1 x Blue Mug\nOrder total: INR 300", "c", (2026, 10, 1)),
+        _mail("track@bluedart.com", "Delivered - Order #ONE1", "Your package has been delivered.", "d", (2026, 10, 3)),
+    ])
+    assert o["items"][0]["state"] == "delivered" and o["open"] is False
+    assert not o["notes"]
+
+
+def test_pending_and_status_tools_mark_output_untrusted():
+    from friday.tools.order_tools import OrderStatus, ParcelsPending
+
+    assert ParcelsPending().untrusted_output is True
+    assert OrderStatus().untrusted_output is True
+
+
 # ---- store dedupe + resolve ---------------------------------------------------------------------
 
 

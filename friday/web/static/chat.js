@@ -461,6 +461,32 @@ async function say(text) {
 $("composer").addEventListener("submit", (e) => { e.preventDefault(); say(input.value); });
 document.querySelectorAll("[data-say]").forEach((b) => b.onclick = () => say(b.dataset.say));
 
+// ---- attach a statement file (uploads to /api/upload, then tells friday it's here) ----------------
+
+const fileInput = $("file"), attachBtn = $("attach");
+attachBtn.onclick = () => fileInput.click();
+fileInput.onchange = async () => {
+  const f = fileInput.files && fileInput.files[0];
+  fileInput.value = "";  // let the same file be chosen again later
+  if (!f) return;
+  const fd = new FormData();
+  fd.append("file", f, f.name);
+  render.stick = true;
+  await busy(attachBtn, async () => {
+    let stored;
+    try {
+      const r = await fetch("/api/upload", { method: "POST", credentials: "same-origin", body: fd });
+      if (r.status === 401) { location.href = "/login?next=/chat"; return; }
+      if (!r.ok) { let d = r.statusText; try { d = (await r.json()).detail || d; } catch {} throw new Error(d); }
+      stored = await r.json();
+    } catch (err) { toast(err.message || "Upload failed"); return; }
+    toast(`Uploaded ${stored.name}`);
+    // put the file in the thread so friday can act on it; name only, resolved by the import tool
+    await req("POST", "/api/chat", { text: `I've uploaded a file named "${stored.name}".` });
+    await refresh();
+  });
+};
+
 // ---- header -------------------------------------------------------------------------
 
 function localGet(k) { try { return localStorage.getItem("friday." + k); } catch { return null; } }

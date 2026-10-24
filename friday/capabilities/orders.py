@@ -62,6 +62,17 @@ _ITEM_RES = [
     re.compile(r"^\s*(?P<name>[A-Za-z0-9][\w &'./\-]{2,70}?)\s*[x×]\s*(?P<qty>\d{1,3})\b", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^\s*(?P<name>[A-Za-z0-9][\w &'./\-]{2,70}?)\s*\(?\s*qty\.?\s*[:=]?\s*(?P<qty>\d{1,3})\s*\)?", re.IGNORECASE | re.MULTILINE),
 ]
+# Inline "1 x Blue Mug from your order ... was delivered": real merchant/carrier mail names the item
+# mid-sentence, not on its own line. Matched anywhere; the name runs word by word until a preposition,
+# status verb or "order" ends it, so prose after the item is not captured. Best-effort, and _NAME_STOP
+# trims any status word that still slips in. Without this, an inline delivery parses as itemless - which
+# the resolver (below) would otherwise spread across the whole order and hide a missing parcel.
+_INLINE_STOP = (r"from|for|of|in|to|on|at|and|with|has|have|had|was|were|is|are|been|will|shipped|"
+                r"delivered|dispatched|cancell\w*|returned?|refund\w*|tracking|awb|consignment|waybill|"
+                r"order|out|arriving|expected|your|the|a|an")
+_INLINE_ITEM_RE = re.compile(
+    rf"(?<![\w/])(?P<qty>\d{{1,3}})[^\S\n]*[x×][^\S\n]+(?P<name>[A-Za-z][\w'&.\-]*(?:[^\S\n]+(?!(?:{_INLINE_STOP})\b)[A-Za-z0-9][\w'&.\-]*){{0,6}})",
+    re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -123,7 +134,7 @@ _NAME_STOP = re.compile(r"\b(was|were|has|have|had|is|are|been|will|shipped|deli
 
 def _items(body: str) -> tuple[Item, ...]:
     found: dict[str, int] = {}
-    for rx in _ITEM_RES:
+    for rx in (*_ITEM_RES, _INLINE_ITEM_RE):
         for m in rx.finditer(body):
             name = re.sub(r"\s+", " ", m.group("name"))
             cut = _NAME_STOP.search(name)  # drop any trailing status prose captured on the same line
@@ -257,7 +268,19 @@ def resolve_order(events: list[OrderEvent]) -> dict[str, Any]:
     total = currency = placed_at = None
     refunds: list[dict[str, Any]] = []
     returns: list[dict[str, Any]] = []
+    notes: list[str] = []
     last_evidence = evs[-1].date
+
+    def _closing_is_ambiguous(ev: OrderEvent, verb: str) -> bool:
+        # A delivery/cancellation that names no parseable item must NOT be spread across every item of a
+        # multi-item order: doing so would mark pending parcels delivered/cancelled from one vague email -
+        # the direction that hides a missing parcel. Keep the items in their current state and note it.
+        # A single-item (or not-yet-itemised) order may still apply it: there is no other item to confuse.
+        if ev.items or len(states) <= 1:
+            return False
+        notes.append(f"a {verb} email on {ev.date} (msg {ev.message_id}) didn't say which item(s) - not "
+                     f"applied; the order's parcels are kept in their known state")  # fmt: skip
+        return True
 
     for ev in evs:
         if ev.kind == "order_confirmation":
@@ -276,6 +299,8 @@ def resolve_order(events: list[OrderEvent]) -> dict[str, Any]:
                                    f"(msg {ev.message_id}) - state unknown")  # fmt: skip
             _apply_to_items(states, ev.items, "shipped")
         elif ev.kind == "delivery":
+            if _closing_is_ambiguous(ev, "delivery"):
+                continue
             _apply_to_items(states, ev.items, "delivered")
             for name in ({i.name for i in ev.items} or set(states)):
                 st = states.setdefault(name, _ItemState())
@@ -283,6 +308,8 @@ def resolve_order(events: list[OrderEvent]) -> dict[str, Any]:
                 if st.delivered_source != "carrier" or ev.source == "carrier":
                     st.delivered_source, st.delivered_date = ev.source, ev.date
         elif ev.kind == "cancellation":
+            if _closing_is_ambiguous(ev, "cancellation"):
+                continue
             _apply_to_items(states, ev.items, "cancelled")
         elif ev.kind == "return":
             _apply_to_items(states, ev.items, "returned")
@@ -301,7 +328,7 @@ def resolve_order(events: list[OrderEvent]) -> dict[str, Any]:
         "merchant": merchant, "order_id": order_id, "placed_at": placed_at.isoformat() if placed_at else None,
         "total": total, "currency": currency, "items": items_out, "open": bool(open_items),
         "open_items": open_items, "refunds": refunds, "returns": returns,
-        "last_evidence": last_evidence.isoformat(),
+        "notes": notes, "last_evidence": last_evidence.isoformat(),
     }
 
 
