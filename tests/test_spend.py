@@ -147,6 +147,92 @@ async def test_denied_payment_is_recorded(ctx):
     assert ctx.spend.ledger.list()[0]["outcome"] == "denied"
 
 
+# ---- reservation accounting: authorised intents consume capacity --------------------------------
+
+
+async def test_two_authorised_intents_cannot_both_pass_the_daily_cap(ctx):
+    # the probe from the audit: two 900 spends under a 1000 daily cap. The first reserves 900; the
+    # second must be refused even though the first is only authorised (tapped), not yet committed.
+    ctx.prefs.set("spend_caps", {"daily": "1000", "currency": "INR"})
+    t1 = asyncio.create_task(ctx.spend.authorise(_intent(total="900", order="a"), task_id="t"))
+    await _approve(ctx)
+    d1 = await t1
+    assert d1.approved
+    d2 = await ctx.spend.authorise(_intent(total="900", order="b"), task_id="t")  # no room: 900 reserved
+    assert not d2.approved and "daily cap" in d2.reason
+
+
+async def test_concurrent_authorise_only_one_passes(ctx):
+    ctx.prefs.set("spend_caps", {"daily": "1000", "currency": "INR"})
+
+    async def attempt(order):
+        return await ctx.spend.authorise(_intent(total="900", order=order), task_id="t")
+
+    both = asyncio.gather(attempt("a"), attempt("b"))
+    # approve any cards that appear; only one request should ever reach a card
+    for _ in range(50):
+        for a in ctx.gate.pending():
+            ctx.gate.decide(a.id, True)
+        if both.done():
+            break
+        await asyncio.sleep(0.01)
+    d1, d2 = await both
+    assert sorted([d1.approved, d2.approved]) == [False, True]  # exactly one passed
+    refused = d1 if not d1.approved else d2
+    assert "daily cap" in refused.reason
+
+
+# ---- the ledger links its approval --------------------------------------------------------------
+
+
+async def test_an_approved_payment_names_its_approval(ctx):
+    ctx.prefs.set("spend_caps", {})
+    task = asyncio.create_task(ctx.spend.authorise(_intent(order="ordA"), task_id="t"))
+    pid = None
+    for _ in range(200):
+        if ctx.gate.pending():
+            pid = ctx.gate.pending()[0].id
+            ctx.gate.decide(pid, True)
+            break
+        await asyncio.sleep(0.01)
+    d = await task
+    assert d.approved
+    row = [r for r in ctx.spend.ledger.list() if r["id"] == d.ledger_id][0]
+    assert row["approval_id"] == pid and pid is not None
+
+
+# ---- reconciliation frees capacity; time does not -----------------------------------------------
+
+
+async def test_a_failed_payment_keeps_consuming_until_reconciled(ctx):
+    ctx.prefs.set("spend_caps", {"daily": "1000", "currency": "INR"})
+    task = asyncio.create_task(ctx.spend.authorise(_intent(total="800", order="a"), task_id="t"))
+    await _approve(ctx)
+    d = await task
+    ctx.spend.failed(d.ledger_id, "gateway error")
+    # a failed payment still holds its 800 of daily capacity (we don't know it didn't charge)
+    assert ctx.spend.ledger.spent_today("INR") == Decimal(800)
+    # reconciling it as "did not go through" frees the capacity, with evidence
+    ctx.spend.reconcile(d.ledger_id, went_through=False, evidence="order page shows no charge")
+    assert ctx.spend.ledger.spent_today("INR") == Decimal(0)
+
+
+async def test_reconcile_as_charged_keeps_consuming(ctx):
+    ctx.prefs.set("spend_caps", {})
+    task = asyncio.create_task(ctx.spend.authorise(_intent(total="300", order="a"), task_id="t"))
+    await _approve(ctx)
+    d = await task
+    ctx.spend.uncertain(d.ledger_id, "no confirmation seen")
+    ctx.spend.reconcile(d.ledger_id, went_through=True, evidence="confirmation email #123", order_id="ORD123")
+    assert ctx.spend.ledger.spent_today("INR") == Decimal(300)  # committed still consumes
+    assert [r for r in ctx.spend.ledger.list() if r["id"] == d.ledger_id][0]["outcome"] == "committed"
+
+
+def test_reconcile_needs_evidence(ctx):
+    with pytest.raises(ValueError, match="evidence"):
+        ctx.spend.ledger.reconcile("nonexistent", False, evidence="")
+
+
 # ---- card numbers never in an intent ------------------------------------------------------------
 
 

@@ -67,6 +67,15 @@ class ApprovalGate:
         self, *, profile_id: str, run_id: str | None, action: str, details: dict[str, Any], ttl_seconds: int | None = None
     ) -> bool:
         """Ask the owner. Returns True only on an explicit approval."""
+        ok, _ = await self.request_id(profile_id=profile_id, run_id=run_id, action=action, details=details,
+                                      ttl_seconds=ttl_seconds)  # fmt: skip
+        return ok
+
+    async def request_id(
+        self, *, profile_id: str, run_id: str | None, action: str, details: dict[str, Any], ttl_seconds: int | None = None
+    ) -> tuple[bool, str]:
+        """Ask the owner. Returns (approved, approval_id) so the caller can link the decision (e.g. a
+        spend-ledger row) to the exact approval that authorised it."""
         details = self._redactor.redact_obj(details)
         action = self._redactor.redact(action)
         now = utcnow()
@@ -95,7 +104,7 @@ class ApprovalGate:
             self._decide(a, ApprovalStatus.EXPIRED, actor="system")
         finally:
             self._live.pop(a.id, None)
-        return a.status == ApprovalStatus.APPROVED
+        return a.status == ApprovalStatus.APPROVED, a.id
 
     def decide(self, approval_id: str, approve: bool, *, actor: str = "admin") -> bool:
         a = self._live.get(approval_id)
