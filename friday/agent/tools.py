@@ -200,6 +200,8 @@ class ExecutorDeps:
     services: Services = field(default_factory=Services)
     action_delay_ms: tuple[int, int] = (400, 1600)
     step_screenshots: bool = True
+    spend_router: Any = None  # friday.checkout.SpendRouter; None means payments always fail closed
+    task_id: str | None = None
 
 
 def _safe_name(name: str) -> str:
@@ -369,6 +371,17 @@ class ToolExecutor:
         )
         if decision.verdict == Verdict.DENY:
             return ToolResult(f"Refused by policy: {decision.reason}", is_error=True)
+        if decision.verdict == Verdict.SPEND:
+            # A payment commit never goes through the generic tap. It is routed to a tested checkout
+            # adapter + the spend gate (caps, bound approval, ledger), or it fails closed. Either way
+            # the raw click is suppressed (this returns a result), so money only moves via the gate.
+            router = self.d.spend_router
+            if router is None or router.adapter_for(self.page.url) is None:
+                from friday.checkout import SpendRouter
+
+                return ToolResult(SpendRouter.fail_closed_message(self.page.url), is_error=True)
+            ok, msg = await router.run(self.page, task_id=self.d.task_id, run_id=self.d.run_id)
+            return ToolResult(msg, is_error=not ok)
         if decision.verdict == Verdict.NEEDS_APPROVAL:
             shot = await self._masked_screenshot("approval")
             form = (el.form or {}) if el else {}

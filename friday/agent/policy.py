@@ -23,7 +23,16 @@ from friday.vault.masking import Redactor
 class Verdict(StrEnum):
     ALLOW = "allow"
     NEEDS_APPROVAL = "needs_approval"
+    SPEND = "spend"  # a money commit: never a generic tap; routed to the spend gate or failed closed
     DENY = "deny"
+
+
+# Words that mean the control itself commits a payment (not just navigates toward one).
+PAY_COMMIT = re.compile(
+    r"\b(pay( now)?|place (the )?order|buy( now)?|purchase|checkout|check out|"
+    r"complete (the )?(order|purchase|payment)|confirm (and )?pay)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -169,6 +178,8 @@ class ActionPolicy:
             if kind in ("auth",) and re.search(r"remember|trust|keep me", name, re.I):
                 return Decision(Verdict.ALLOW, "remember-this-device on sign-in")
             return Decision(Verdict.NEEDS_APPROVAL, f"checkbox {name!r} gives consent or changes a setting")
+        if PAY_COMMIT.search(name):
+            return Decision(Verdict.SPEND, f"control {name!r} commits a payment")
         if RISKY.search(name):
             kind = form_kind(el.get("form"))
             if kind == "auth" and AUTH_WORDS.search(name) and not re.search(r"pay|transfer|payee|beneficiar|order|buy", name, re.I):
@@ -179,6 +190,8 @@ class ActionPolicy:
     def _submit(self, el: dict[str, Any], what: str) -> Decision:
         name = el.get("name") or ""
         kind = form_kind(el.get("form"))
+        if PAY_COMMIT.search(name):
+            return Decision(Verdict.SPEND, f"{what} commits a payment")
         if re.search(r"pay|transfer|payee|beneficiar|order|buy|purchase|delete|close account", name, re.I):
             return Decision(Verdict.NEEDS_APPROVAL, f"{what} looks like a money or account change")
         if kind == "auth":

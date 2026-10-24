@@ -192,9 +192,12 @@ class JobRunner:
             state = await ctx.handoffs.wait(h.id)
             return "The owner finished; read the page and continue." if state.value == "done" else f"Handoff {state.value}; finish with status blocked."
 
+        from friday.checkout import SpendRouter
+
         deps = ExecutorDeps(
             policy=ActionPolicy(PolicyContext(nav_domains, ctx.redactor)),
             gate=ctx.gate,
+            spend_router=SpendRouter(ctx.spend) if ctx.spend else None,
             injector=ctx.injector,
             scope=InjectionScope(profile.id, prefix, nav_domains),
             files=ctx.files,
