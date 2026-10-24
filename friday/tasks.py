@@ -169,19 +169,34 @@ class TaskLedger:
     # ---- recovery ----------------------------------------------------------------------------
 
     def recover(self) -> list[dict[str, Any]]:
-        """At startup: any task left mid-flight is now interrupted. Returns the interrupted tasks so
-        the caller can tell the owner. Also records a durable 'interrupted' schedule_runs row for a
-        scheduled fire that was in flight (a started-but-unfinished side effect on a schedule plan)."""
+        """At startup: any owner task left mid-flight is now interrupted (returned so the caller can
+        tell the owner). For a scheduled fire that was in flight when it crashed (a side effect
+        journaled 'started' but never 'finished', on a plan tied to a schedule and not an owner task),
+        a durable 'interrupted' schedule_runs row is recorded - with the uncertain steps listed - so
+        it surfaces in the daily brief's "didn't complete" section."""
         live = self.ctx.db.query(f"SELECT id FROM tasks WHERE status IN ({','.join('?' * len(LIVE_AT_CRASH))})", LIVE_AT_CRASH)
         for r in live:
             self._update(r["id"], status="interrupted")
-        # scheduled fires have no task row; surface an in-flight one from the journal.
+        # scheduled fires have no task row; map an in-flight one to its schedule via the plan row.
         sched = self.ctx.db.query(
-            "SELECT DISTINCT plan_id FROM task_journal WHERE plan_id NOT IN (SELECT id FROM tasks)"
+            "SELECT p.id AS plan_id, p.schedule_id AS schedule_id FROM plans p"
+            " WHERE p.schedule_id IS NOT NULL AND p.id NOT IN (SELECT id FROM tasks)"
+            " AND p.id IN (SELECT plan_id FROM task_journal)"
         )
         for r in sched:
-            if self.uncertain_steps(r["plan_id"]):
-                log.warning("scheduled plan %s was interrupted mid side-effect", r["plan_id"])
-        if live:
+            uncertain = self.uncertain_steps(r["plan_id"])
+            if not uncertain:
+                continue
+            steps = ", ".join(f"{u['tool']}({u['step_id']})" for u in uncertain)
+            now = iso()
+            # id keyed by the plan so repeated recover() calls don't duplicate the row.
+            self.ctx.db.execute(
+                "INSERT OR IGNORE INTO schedule_runs (id, schedule_id, outcome, detail, started_at, finished_at)"
+                " VALUES (?, ?, 'interrupted', ?, ?, ?)",
+                (f"intr-{r['plan_id']}", r["schedule_id"],
+                 f"a restart interrupted this scheduled run mid side-effect; uncertain steps: {steps}", now, now),
+            )  # fmt: skip
+            log.warning("scheduled plan %s (schedule %s) was interrupted mid side-effect", r["plan_id"], r["schedule_id"])
+        if live or sched:
             self.ctx.audit.record("task.recover", actor="system", count=len(live))
         return [self.get(r["id"]) for r in live]  # type: ignore[misc]

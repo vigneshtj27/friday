@@ -68,6 +68,10 @@ class Call:
     # an effect named in require_approval always gets a card. None means no playbook narrowing.
     allowed_effects: set[str] | None = None
     require_approval: set[str] = field(default_factory=set)
+    # A playbook run's allowed domains (the header list, un-narrowed). A browser run started under
+    # this call confines navigation to the intersection of these with the account's own domains, and
+    # is refused if that intersection is empty. None means no playbook domain narrowing.
+    allowed_domains: list[str] | None = None
 
     async def say(self, text: str) -> None:
         if self.progress:

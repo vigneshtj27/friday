@@ -77,14 +77,14 @@ class TaskResume(Tool):
         if t is None:
             raise ToolError("no single interrupted task matches that")
         uncertain = ctx.tasks.uncertain_steps(t["id"])
-        ctx.tasks.mark_running_again(t["id"])
         if ctx.chat.assistant is None:
             raise ToolError("can't resume: the model isn't configured")
         note = (" Note: a step was in flight when it stopped; its tool re-checks state before acting." if uncertain else "")
-        # Re-run the stored request as a fresh plan. Its tools re-verify state (read-back), so an
-        # already-applied write is skipped rather than duplicated. run_nested avoids re-taking the
-        # chat lock (we're already inside a reply) and keeps the outer plan's state intact.
-        reply = await ctx.chat.assistant.run_nested(t["request"], origin="owner")
+        # Re-run the stored request UNDER THE ORIGINAL task id, so there is exactly one task: the
+        # nested plan continues this task row and finalizes it (done/blocked), instead of opening a
+        # second row and leaving the original 'running' forever (a zombie a later recover() would
+        # re-interrupt). Its tools re-verify state (read-back), so an applied write isn't duplicated.
+        reply, _ = await ctx.chat.assistant.run_nested(t["request"], origin="owner", task_id=t["id"])
         return {"resumed": t["id"], "uncertain_steps": len(uncertain), "reply": reply + note,
                 "verified": [f"task {t['id']} resumed"]}  # fmt: skip
 

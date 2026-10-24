@@ -71,12 +71,17 @@ class ChatAssistant:
         return await self.planner.handle(text, recap=recap, origin=origin, schedule_id=schedule_id,
                                          watch_id=watch_id, constraints=constraints)  # fmt: skip
 
-    async def run_nested(self, text: str, *, origin: str = "owner", constraints: dict[str, Any] | None = None) -> str:
+    async def run_nested(self, text: str, *, origin: str = "owner", constraints: dict[str, Any] | None = None,
+                         task_id: str | None = None) -> tuple[str, str | None]:  # fmt: skip
         """Run a request from inside another run (a playbook, a resume) without re-taking the reply
-        lock or clobbering the outer plan's state: a fresh Planner on the same ctx and model."""
+        lock or clobbering the outer plan's state: a fresh Planner on the same ctx and model. Returns
+        (reply, plan_id) so the caller can read exactly THIS run's plan row. When task_id is given
+        (a resume), the nested plan runs under that task id instead of opening a new task."""
         from friday.planner import Planner
 
-        return await Planner(self.ctx, self._llm_factory).handle(text, origin=origin, constraints=constraints)
+        planner = Planner(self.ctx, self._llm_factory)
+        reply = await planner.handle(text, origin=origin, constraints=constraints, task_id=task_id)
+        return reply, planner.last_plan_id
 
     def status_line(self) -> str | None:
         return self.planner.status_line()
@@ -113,6 +118,8 @@ class ChatAssistant:
                 params["then"] = {"sheet": self._sheet_target()}
         elif kind == "task":
             params = {"goal": args.get("goal") or ""}
+        if args.get("allowed_domains"):  # a playbook run's confined navigation allowlist
+            params["allowed_domains"] = list(args["allowed_domains"])
         return kind, params, note
 
     def _profile(self, account: str) -> Any:

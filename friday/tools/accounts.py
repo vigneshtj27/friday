@@ -79,7 +79,21 @@ class BrowserRun(Tool):
 
     async def run(self, args: dict[str, Any], call: Call) -> Any:
         ctx, a = call.ctx, _assistant(call)
-        out = await a._run_tool("start_run", {k: v for k, v in args.items() if v is not None})
+        start_args = {k: v for k, v in args.items() if v is not None}
+        if call.allowed_domains is not None:
+            # A playbook run: confine the browser to the intersection of the playbook's domains and
+            # the account's own. Fail closed if they don't overlap - never widen to the full site.
+            from friday.playbooks import confine_domains
+
+            profile = a._profile(args["account"])
+            site = ctx.sites.get(profile.site_id)
+            site_domains = site.all_domains if site else []
+            confined = confine_domains(call.allowed_domains, site_domains)
+            if not confined:
+                raise ToolError(f"this playbook's allowed domains {call.allowed_domains} don't include any of "
+                                f"{args['account']}'s site domains, so I won't run a browser job for it")  # fmt: skip
+            start_args["allowed_domains"] = confined
+        out = await a._run_tool("start_run", start_args)
         run_id = out["run_id"]
         await call.say(f"Started {out['kind'].replace('_', ' ')} on {args['account']}")
         return await wait_for_run(ctx, run_id, call, note=out.get("note"))

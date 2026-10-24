@@ -54,6 +54,28 @@ def test_recover_marks_live_tasks_interrupted(ctx):
     assert ctx.tasks.get("t4")["status"] == "done"  # already terminal, not reopened
 
 
+def test_recover_records_an_interrupted_scheduled_fire(ctx):
+    from friday.brief import build_brief
+    from friday.util import iso
+
+    sid = ctx.scheduler.create("job", "refresh expenses", {"every": "days", "n": 1, "time": "08:00"})["id"]
+    # a scheduled fire: a plan tied to the schedule, with a side-effect started but never finished
+    ctx.db.execute("INSERT INTO plans (id, request, goal, status, state_json, schedule_id, created_at, updated_at)"
+                   " VALUES ('pf1', 'refresh', 'refresh', 'running', '{}', ?, ?, ?)", (sid, iso(), iso()))  # fmt: skip
+    ctx.tasks.journal_start("pf1", "s1", "sheets_add_transactions", "write")  # started, never finished
+
+    ctx.tasks.recover()
+    row = ctx.db.query_one("SELECT * FROM schedule_runs WHERE schedule_id = ? AND outcome = 'interrupted'", (sid,))
+    assert row is not None and "sheets_add_transactions" in row["detail"]
+    # a second recover() does not duplicate it
+    ctx.tasks.recover()
+    n = ctx.db.query_one("SELECT COUNT(*) AS n FROM schedule_runs WHERE outcome = 'interrupted'")["n"]
+    assert n == 1
+    # it surfaces in the daily brief's "didn't complete" section
+    brief = build_brief(ctx)
+    assert brief and "didn't complete" in brief and "refresh expenses" in brief
+
+
 def test_resolve_by_id_or_words_and_cancel(ctx):
     ctx.tasks.open("abc123", "fetch my october amex expenses")
     assert ctx.tasks.cancel("october amex")["id"] == "abc123"
@@ -199,6 +221,26 @@ async def test_chat_lists_and_cancels_tasks(ctx):
     await ctx.chat.owner_says("cancel the expenses task")
     await settle(ctx)
     assert ctx.tasks.get("k1")["status"] == "cancelled"
+
+
+async def test_resume_runs_under_the_original_task_and_leaves_no_zombie(ctx):
+    ctx.tasks.open("orig", "do the thing")
+    ctx.tasks.running("orig", "step 1")
+    ctx.tasks.recover()  # a restart interrupted it
+    assert ctx.tasks.get("orig")["status"] == "interrupted"
+
+    attach(ctx, PlanLLM([plan(step("tasks_open"))], reports=["Done the thing."]))
+    call = Call(ctx=ctx, owner_text="resume orig", plan_id="outer")
+    out = await ctx.tools.call("task_resume", {"query": "orig", "owner_quote": "resume orig"}, call)
+    assert out["resumed"] == "orig"
+    # the ORIGINAL task is now terminal - not a zombie left 'running'
+    assert ctx.tasks.get("orig")["status"] == "done"
+    # the resume did NOT open a second task row
+    assert len(ctx.tasks.list()) == 1
+    assert ctx.tasks.open_tasks() == []
+    # a following restart recovery does not re-interrupt the finished task
+    assert ctx.tasks.recover() == []
+    assert ctx.tasks.get("orig")["status"] == "done"
 
 
 async def test_a_web_page_cannot_cancel_or_resume_a_task(ctx):

@@ -45,6 +45,17 @@ def narrow_domains(allowed: list[str], site_domains: list[str]) -> list[str]:
     return keep or list(site_domains)  # an empty header means "the site's own domains"
 
 
+def confine_domains(allowed: list[str], site_domains: list[str]) -> list[str]:
+    """STRICT intersection for enforcement (unlike narrow_domains, no fallback to the full site): an
+    empty header means no narrowing (the site's own domains); a non-empty header that matches none of
+    the site's domains returns [], and the caller must refuse the run rather than silently widen it."""
+    if not allowed:
+        return list(site_domains)
+    site = {d.lower().lstrip(".") for d in site_domains}
+    return [d for d in allowed
+            if any((dl := d.lower().lstrip(".")) == s or dl.endswith("." + s) or s.endswith("." + dl) for s in site)]  # fmt: skip
+
+
 def narrow_effects(allowed: list[str]) -> set[str]:
     """Reads are always permitted; everything else must be listed. Unknown names are dropped."""
     out = {e for e in allowed if e in EFFECT_CLASSES}

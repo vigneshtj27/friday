@@ -6,8 +6,10 @@ import asyncio
 
 import pytest
 
-from friday.playbooks import narrow_domains, narrow_effects
+from friday.agent.policy import ActionPolicy, PolicyContext, Verdict
+from friday.playbooks import confine_domains, narrow_domains, narrow_effects
 from friday.tools.base import Call, Tool, ToolError
+from friday.vault.masking import Redactor
 
 from .planner_fakes import PlanLLM, attach, last_friday, plan, settle, step
 from .test_tools import approve_next
@@ -67,6 +69,45 @@ def test_narrow_effects_always_allows_read_and_drops_unknown():
     assert narrow_effects(["write", "send"]) == {"read", "write", "send"}
     assert narrow_effects(["nonsense", "spend"]) == {"read", "spend"}
     assert narrow_effects([]) == {"read"}
+
+
+# ---- domain enforcement (Part 1.1) --------------------------------------------------------------
+
+
+def test_confine_domains_is_strict_no_fallback():
+    # empty header -> no narrowing (the site's own domains)
+    assert confine_domains([], ["bank.example"]) == ["bank.example"]
+    # a header that matches the site keeps only the matching ones
+    assert confine_domains(["americanexpress.com", "evil.com"], ["americanexpress.com", "aexp.com"]) == ["americanexpress.com"]
+    # a header disjoint from the site returns [] (unlike narrow_domains, which falls back) -> caller refuses
+    assert confine_domains(["evil.com"], ["bank.example"]) == []
+
+
+def test_policy_denies_navigation_outside_the_confined_domains():
+    # the navigation allowlist the browser layer is given for a playbook run
+    confined = tuple(confine_domains(["americanexpress.com"], ["americanexpress.com", "aexp.com"]))
+    pol = ActionPolicy(PolicyContext(confined, Redactor()))
+    assert pol.decide("goto", {"url": "https://www.americanexpress.com/activity"}).verdict == Verdict.ALLOW
+    assert pol.decide("goto", {"url": "https://aexp.com/x"}).verdict == Verdict.DENY  # dropped by the playbook
+    assert pol.decide("goto", {"url": "https://evil.com/collect"}).verdict == Verdict.DENY
+
+
+async def test_playbook_browser_run_fails_closed_on_disjoint_domains(ctx):
+    ctx.profiles.create("mybank", "me")  # the conftest site 'mybank' has domain mybank.example
+    attach(ctx, PlanLLM([plan(reply="unused")]))
+    # a playbook whose domains don't include the account's site domain
+    call = Call(ctx=ctx, owner_text="run the playbook", plan_id="p1", allowed_domains=["evil.com"])
+    with pytest.raises(ToolError, match="don't include any of"):
+        await ctx.tools.call("browser_run", {"account": "mybank.me", "kind": "task", "goal": "do a thing"}, call)
+
+
+def test_job_params_carry_the_confined_domains(ctx):
+    # the tool->job path records the confined allowlist so the executor can enforce it at run time
+    from friday.assistant import ChatAssistant
+
+    a = ChatAssistant(ctx, lambda: None)
+    _, params, _ = a._job({"kind": "task", "goal": "x", "allowed_domains": ["mybank.example"]})
+    assert params["allowed_domains"] == ["mybank.example"]
 
 
 # ---- registry enforcement of narrowing ----------------------------------------------------------
@@ -147,6 +188,25 @@ async def test_running_a_playbook_narrows_effects(ctx):
     await settle(ctx)
     # the playbook still exists and nothing was cancelled through it
     assert ctx.playbooks.get("ReadOnly") is not None
+
+
+# ---- run verdict reads THIS run's plan, not the globally newest (Part 1.5) -----------------------
+
+
+async def test_run_nested_returns_its_own_plan_id(ctx):
+    from friday.util import iso
+
+    attach(ctx, PlanLLM([plan(step("tasks_open"))], reports=["did it"]))
+    reply, plan_id = await ctx.chat.assistant.run_nested("do a thing", origin="owner")
+    assert plan_id and reply
+    assert ctx.db.query_one("SELECT status FROM plans WHERE id = ?", (plan_id,))["status"] == "done"
+    # a later, unrelated plan row (e.g. a scheduled job finishing) would be the globally-newest one,
+    # but reading by the returned id is immune to that interleaving.
+    ctx.db.execute("INSERT INTO plans (id, request, goal, status, state_json, created_at, updated_at)"
+                   " VALUES ('other', 'x', 'x', 'blocked', '{}', ?, ?)", (iso(), iso()))  # fmt: skip
+    newest = ctx.db.query_one("SELECT id FROM plans ORDER BY updated_at DESC LIMIT 1")
+    assert newest["id"] == "other"  # newest-wins would read 'blocked'
+    assert ctx.db.query_one("SELECT status FROM plans WHERE id = ?", (plan_id,))["status"] == "done"
 
 
 # ---- proposal after a successful task ------------------------------------------------------------

@@ -19,8 +19,8 @@ from friday.capabilities.task import OwnerTask
 from friday.login.classifier import LoginState
 from friday.login.engine import LoginEngine, LoginServices
 from friday.runs import RunStatus
-from friday.util import iso, utcnow
 from friday.sheets import validate_then
+from friday.util import iso, utcnow
 from friday.vault.injector import InjectionScope
 
 log = logging.getLogger(__name__)
@@ -82,12 +82,15 @@ class JobRunner:
         params = dict(params or {})
         profile = self.ctx.profiles.get(profile_id)
         then = params.pop("then", None)
+        confined = params.pop("allowed_domains", None)  # a playbook's confined navigation allowlist
         if kind == "fetch_statement":
             params = FetchStatement.validate(params)
         if kind == "task":
             params = OwnerTask.validate(params)
         if kind == "fetch_activity":
             params = FetchActivity.validate(params)
+        if confined:
+            params["allowed_domains"] = [str(d) for d in confined]
         if then is not None:
             if kind not in FETCH_KINDS:
                 raise ValueError("only statement and activity fetches can be followed by a sheet update")
@@ -162,10 +165,15 @@ class JobRunner:
 
     # ---- execution --------------------------------------------------------
 
-    def _executor(self, op: Any, page: Any, run_id: str, llm: Any) -> ToolExecutor:
+    def _executor(self, op: Any, page: Any, run_id: str, llm: Any, *, allowed_domains: list[str] | None = None) -> ToolExecutor:
         ctx = self.ctx
         profile, site = op.profile, op.site
         prefix = profile.secret_prefix
+        # A playbook run confines navigation to its own domains (already intersected with the site's at
+        # the tool boundary). Default: the site's own domains. Never wider than the site.
+        from friday.playbooks import confine_domains
+
+        nav_domains = tuple(confine_domains(allowed_domains, site.all_domains)) if allowed_domains else site.all_domains
 
         async def request_otp(channel: str, reason: str) -> str:
             res = await ctx.broker.obtain(profile=profile, site=site, channel=channel, since=utcnow() - timedelta(minutes=2), run_id=run_id)
@@ -185,10 +193,10 @@ class JobRunner:
             return "The owner finished; read the page and continue." if state.value == "done" else f"Handoff {state.value}; finish with status blocked."
 
         deps = ExecutorDeps(
-            policy=ActionPolicy(PolicyContext(site.all_domains, ctx.redactor)),
+            policy=ActionPolicy(PolicyContext(nav_domains, ctx.redactor)),
             gate=ctx.gate,
             injector=ctx.injector,
-            scope=InjectionScope(profile.id, prefix, site.all_domains),
+            scope=InjectionScope(profile.id, prefix, nav_domains),
             files=ctx.files,
             runs=ctx.runs,
             audit=ctx.audit,
@@ -284,7 +292,7 @@ class JobRunner:
                 return None
             recorder = PageRecorder(ctx.redactor)
             recorder.attach(op.session.context)
-            ex = self._executor(op, page, run_id, llm)
+            ex = self._executor(op, page, run_id, llm, allowed_domains=params.get("allowed_domains"))
             engine = LoginEngine(
                 LoginServices(
                     llm=llm, runs=ctx.runs, vault=ctx.vault, broker=ctx.broker, notifier=ctx.notifier,

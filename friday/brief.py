@@ -35,7 +35,8 @@ def _changed_watches(ctx: Any, since: str) -> list[str]:
 def _failed_runs(ctx: Any, since: str) -> list[str]:
     rows = ctx.db.query(
         "SELECT s.text AS text, r.outcome AS outcome FROM schedule_runs r JOIN schedules s ON s.id = r.schedule_id"
-        " WHERE r.finished_at >= ? AND r.outcome IN ('error', 'blocked', 'approval_denied') ORDER BY r.finished_at DESC",
+        " WHERE r.finished_at >= ? AND r.outcome IN ('error', 'blocked', 'approval_denied', 'interrupted')"
+        " ORDER BY r.finished_at DESC",
         (since,),
     )
     return [f"{r['text']} ({r['outcome']})" for r in rows]

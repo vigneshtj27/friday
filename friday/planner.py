@@ -273,6 +273,8 @@ class Planner:
         self._llm_factory = llm_factory
         self._llm: Any = None
         self.current: PlanState | None = None
+        self.last_plan_id: str | None = None  # the id of the most recent plan this planner ran
+        self._schedule_id: str | None = None
 
     @property
     def llm(self) -> Any:
@@ -345,10 +347,17 @@ class Planner:
 
     async def handle(self, request: str, *, recap: str = "", origin: str = "owner",
                      schedule_id: str | None = None, watch_id: str | None = None,
-                     constraints: dict[str, Any] | None = None) -> str:  # fmt: skip
-        """Plan and carry out one owner request; returns the final chat message."""
+                     constraints: dict[str, Any] | None = None, task_id: str | None = None) -> str:  # fmt: skip
+        """Plan and carry out one owner request; returns the final chat message.
+
+        task_id, when given (a resume), is reused as the plan id so the run continues the ORIGINAL
+        task row rather than opening a new one - the original is finalized here, not left running."""
         self._cost = 0.0
-        state = PlanState(secrets.token_hex(6), request)
+        # Reuse the task id for a resume so there is exactly one task, and the plan row updates in place.
+        resuming = task_id is not None
+        state = PlanState(task_id or secrets.token_hex(6), request)
+        self.last_plan_id = state.id  # so a nested caller (playbook_run, resume) can read THIS plan's row
+        self._schedule_id = schedule_id  # persisted on the plan row so a crashed fire maps to its schedule
         self.current = state
         call = Call(ctx=self.ctx, owner_text=request, plan_id=state.id, trusted_targets=self._trusted_targets(),
                     origin=origin, watch_id=watch_id)  # fmt: skip
@@ -358,8 +367,12 @@ class Planner:
             eff = constraints.get("allowed_effects")
             call.allowed_effects = set(eff) if eff is not None else None
             call.require_approval = set(constraints.get("required_approvals") or [])
+            call.allowed_domains = constraints.get("allowed_domains")
         if self.ctx.tasks is not None:
-            self.ctx.tasks.open(state.id, request, origin=origin, schedule_id=schedule_id)
+            if resuming:
+                self.ctx.tasks.mark_running_again(task_id)  # the row already exists; don't open a second
+            else:
+                self.ctx.tasks.open(state.id, request, origin=origin, schedule_id=schedule_id)
         if watch_id:
             recap = (recap + "\n" if recap else "") + WATCH_DIRECTIVE
         results: dict[str, Any] = {}
@@ -564,11 +577,12 @@ class Planner:
     def _save(self, state: PlanState) -> None:
         pub = state.public()
         self.ctx.db.execute(
-            "INSERT INTO plans (id, request, goal, status, state_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO plans (id, request, goal, status, state_json, schedule_id, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(id) DO UPDATE SET goal = excluded.goal, status = excluded.status, state_json = excluded.state_json,"
-            " updated_at = excluded.updated_at",
+            " schedule_id = excluded.schedule_id, updated_at = excluded.updated_at",
             (state.id, self.ctx.redactor.redact(state.request)[:2000], state.goal, state.status,
-             self.ctx.redactor.redact(json.dumps(pub)), iso(), iso()),
+             self.ctx.redactor.redact(json.dumps(pub)), getattr(self, "_schedule_id", None), iso(), iso()),
         )  # fmt: skip
         self.ctx.chat.store.touch()
 

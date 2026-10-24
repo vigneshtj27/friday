@@ -85,11 +85,13 @@ class PlaybookRun(Tool):
             raise ToolError("no single playbook matches that")
         if ctx.chat.assistant is None:
             raise ToolError("can't run a playbook: the model isn't configured")
-        constraints = {"allowed_effects": pb["allowed_effects"], "required_approvals": pb["required_approvals"]}
+        constraints = {"allowed_effects": pb["allowed_effects"], "required_approvals": pb["required_approvals"],
+                       "allowed_domains": pb["allowed_domains"]}  # fmt: skip
         instruction = f"{pb['goal']}\n\n{pb['body']}"
-        reply = await ctx.chat.assistant.run_nested(instruction, origin="owner", constraints=constraints)
-        # Did the run end cleanly? The last plan row carries the status.
-        row = ctx.db.query_one("SELECT status FROM plans ORDER BY updated_at DESC LIMIT 1")
+        reply, plan_id = await ctx.chat.assistant.run_nested(instruction, origin="owner", constraints=constraints)
+        # Read THIS run's own plan row (not the globally newest, which a scheduled job finishing in
+        # between could be), so the verdict can't be flipped by an interleaved plan.
+        row = ctx.db.query_one("SELECT status FROM plans WHERE id = ?", (plan_id,)) if plan_id else None
         ok = bool(row) and row["status"] == "done"
         after = ctx.playbooks.note_run_outcome(pb["id"], ok)
         note = "" if ok else " The run didn't complete; rolled back to the last-good version."

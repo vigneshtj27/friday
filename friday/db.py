@@ -416,6 +416,11 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX spend_ledger_day ON spend_ledger(currency, created_at);
     """,
+    """
+    -- Link a saved plan to the schedule that fired it, so a crash mid-scheduled-run can be mapped
+    -- back to its schedule and recorded as a durable 'interrupted' schedule_runs row on recovery.
+    ALTER TABLE plans ADD COLUMN schedule_id TEXT;
+    """,
 ]
 
 
