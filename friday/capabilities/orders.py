@@ -74,6 +74,19 @@ _INLINE_ITEM_RE = re.compile(
     rf"(?<![\w/])(?P<qty>\d{{1,3}})[^\S\n]*[x×][^\S\n]+(?P<name>[A-Za-z][\w'&.\-]*(?:[^\S\n]+(?!(?:{_INLINE_STOP})\b)[A-Za-z0-9][\w'&.\-]*){{0,6}})",
     re.IGNORECASE)
 
+# The item name's FIRST word decides product vs prose, across ALL the patterns above. A real order line
+# starts with a product/brand word ("Blue Mug", "steel kettle", "iPhone"); prose captured by a bare
+# "N x ..." starts with a function or vague-amount word ("1 x the usual amount", "2 x your favourite
+# snacks", "1 x the points"). Rejecting a name whose first word is one of these drops the prose without a
+# blanket stop-list that would also kill lowercase product names. (Done as a post-filter, not in each
+# regex, so it covers the line-anchored and inline forms alike.)
+_FIRST_STOP_WORDS = frozenset(
+    "the a an this that these those your my our their his her its "
+    "of for to in on at by with and or from as "
+    "usual amount favourite favorite lot lots couple bunch few some several many "
+    "more less most any all each every same other another number kind sort type bit".split()
+)
+
 
 @dataclass(frozen=True)
 class OrderEmail:
@@ -145,7 +158,9 @@ def _items(body: str) -> tuple[Item, ...]:
                 qty = int(m.group("qty"))
             except (ValueError, TypeError):
                 continue
-            if name and 0 < qty <= 999 and name.lower() not in {"order", "total", "qty", "quantity", "item", "items"}:
+            first = name.split()[0].lower() if name else ""
+            if (name and 0 < qty <= 999 and first not in _FIRST_STOP_WORDS
+                    and name.lower() not in {"order", "total", "qty", "quantity", "item", "items"}):  # fmt: skip
                 found[name] = max(found.get(name, 0), qty)
     return tuple(Item(n, q) for n, q in found.items())
 

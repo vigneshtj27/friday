@@ -22,6 +22,12 @@ def _mail(sender, subject, body, mid="m1", d=(2026, 10, 1)):
     return OrderEmail(sender=sender, subject=subject, body=body, message_id=mid, received_date=date(*d))
 
 
+def _items_list(body):
+    from friday.capabilities.orders import _items
+
+    return [(i.name, i.qty) for i in _items(body)]
+
+
 def _events(*mails):
     evs, _, _ = parse_order_messages(list(mails))
     return evs
@@ -144,6 +150,44 @@ def test_no_delivery_email_is_not_verified_undelivered():
     ])
     assert o["items"][0]["state"] == "in_transit"  # shipped, no delivery mail -> in transit, not "undelivered"
     assert o["items"][0]["delivered_on"] is None
+
+
+# ---- inline item parsing: real products in, prose out -------------------------------------------
+
+
+@pytest.mark.parametrize("body", [
+    "1 x the usual amount of luck",           # the reported false positive
+    "2 x your favourite snacks",              # possessive + adjective prose, no product
+    "You'll get 1 x the points on this purchase",  # marketing prose containing "1 x"
+    "Save 2 x more when you order today",     # quantifier prose
+    "worth 1 x your money",                   # pronoun prose
+])
+def test_inline_prose_parses_no_items(body):
+    assert _items_list(body) == []  # a bare "N x <function word> ..." is prose, not an order line
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("1 x Blue Mug", [("Blue Mug", 1)]),
+    ("2 x steel kettle", [("steel kettle", 2)]),           # lowercase product must survive
+    ("We delivered 1 x iPhone 15 Pro to you", [("iPhone 15 Pro", 1)]),
+    ("Good news: 1 x Blue Mug from your order was delivered", [("Blue Mug", 1)]),
+])
+def test_inline_real_products_still_parse(body, expected):
+    assert _items_list(body) == expected
+
+
+def test_line_anchored_items_unaffected():
+    assert _items_list("1 x Blue Mug\n1 x Steel Kettle") == [("Blue Mug", 1), ("Steel Kettle", 1)]
+
+
+def test_inline_capture_stays_bounded_to_six_words():
+    # the bounded-capture guarantee: an inline name never runs away across a long prose tail
+    # inline (mid-sentence) so the line-anchored patterns don't apply; the inline capture is bounded to
+    # the first word + at most 6 continuation words and never runs away across the whole prose tail.
+    body = "Shipped: 1 x Alpha Beta Gamma Delta Epsilon Zeta Eta Theta Iota Kappa today"
+    names = [n for n, _ in _items_list(body)]
+    assert names and all(1 <= len(n.split()) <= 7 for n in names)
+    assert all("Kappa" not in n for n in names)
 
 
 # ---- resolver fails CLOSED, not open, on unparseable / itemless closing events ------------------

@@ -23,6 +23,31 @@ async def _approve(ctx):
     await approve_next(ctx, True)
 
 
+async def _decide_until(ctx, fut, *, approve: bool = True, timeout: float = 10.0):
+    """Keep approving/denying every card that appears until `fut` completes, then return its result.
+
+    Replaces the fragile pattern of a FIXED-LENGTH poll loop followed by a bare `await fut`: if the
+    loop ever ends before the card it was meant to decide is decided, `await fut` then parks on the
+    gate's 600s TTL and the test hangs until the global --timeout kills it (the reported
+    'test_spend.py hangs 60s+' shape). Whatever makes a card go undecided - a scheduling/loop
+    difference across environments, or a real regression where no card is ever answered - deciding
+    concurrently with a hard wait_for turns the hang into a fast, clear failure instead."""
+    async def decider():
+        while True:
+            for a in ctx.gate.pending():
+                ctx.gate.decide(a.id, approve)
+            await asyncio.sleep(0.005)
+
+    d = asyncio.create_task(decider())
+    try:
+        return await asyncio.wait_for(asyncio.shield(fut), timeout)
+    except TimeoutError as e:  # pragma: no cover - only on a real regression
+        raise AssertionError(f"spend authorise did not settle within {timeout}s - a card was never "
+                             "decided (deadlock or a missing decider), not a slow machine") from e
+    finally:
+        d.cancel()
+
+
 # ---- effect classes -----------------------------------------------------------------------------
 
 
@@ -169,14 +194,9 @@ async def test_concurrent_authorise_only_one_passes(ctx):
         return await ctx.spend.authorise(_intent(total="900", order=order), task_id="t")
 
     both = asyncio.gather(attempt("a"), attempt("b"))
-    # approve any cards that appear; only one request should ever reach a card
-    for _ in range(50):
-        for a in ctx.gate.pending():
-            ctx.gate.decide(a.id, True)
-        if both.done():
-            break
-        await asyncio.sleep(0.01)
-    d1, d2 = await both
+    # approve any card that appears (only one request should ever reach a card), deciding concurrently
+    # with a hard timeout so a missed decision fails fast instead of parking on the gate's TTL
+    d1, d2 = await _decide_until(ctx, both, approve=True)
     assert sorted([d1.approved, d2.approved]) == [False, True]  # exactly one passed
     refused = d1 if not d1.approved else d2
     assert "daily cap" in refused.reason
@@ -188,15 +208,9 @@ async def test_concurrent_authorise_only_one_passes(ctx):
 async def test_an_approved_payment_names_its_approval(ctx):
     ctx.prefs.set("spend_caps", {})
     task = asyncio.create_task(ctx.spend.authorise(_intent(order="ordA"), task_id="t"))
-    pid = None
-    for _ in range(200):
-        if ctx.gate.pending():
-            pid = ctx.gate.pending()[0].id
-            ctx.gate.decide(pid, True)
-            break
-        await asyncio.sleep(0.01)
-    d = await task
+    d = await _decide_until(ctx, task, approve=True)
     assert d.approved
+    pid = ctx.gate.history()[0]["id"]  # the approval just decided
     row = [r for r in ctx.spend.ledger.list() if r["id"] == d.ledger_id][0]
     assert row["approval_id"] == pid and pid is not None
 
