@@ -161,9 +161,11 @@ def test_no_delivery_email_is_not_verified_undelivered():
     "You'll get 1 x the points on this purchase",  # marketing prose containing "1 x"
     "Save 2 x more when you order today",     # quantifier prose
     "worth 1 x your money",                   # pronoun prose
+    "1 x the points",                         # bare function-word-led prose
+    "1 x a great deal",                       # bare function-word-led prose
 ])
 def test_inline_prose_parses_no_items(body):
-    assert _items_list(body) == []  # a bare "N x <function word> ..." is prose, not an order line
+    assert _items_list(body) == []  # a bare "N x <lowercase function word> ..." is prose, not an order line
 
 
 @pytest.mark.parametrize("body,expected", [
@@ -171,6 +173,10 @@ def test_inline_prose_parses_no_items(body):
     ("2 x steel kettle", [("steel kettle", 2)]),           # lowercase product must survive
     ("We delivered 1 x iPhone 15 Pro to you", [("iPhone 15 Pro", 1)]),
     ("Good news: 1 x Blue Mug from your order was delivered", [("Blue Mug", 1)]),
+    # brands whose FIRST word is a function word but keep their own casing -> must still parse
+    ("1 x The Ordinary Niacinamide serum delivered.", [("The Ordinary Niacinamide serum", 1)]),
+    ("1 x All Saints t-shirt delivered.", [("All Saints t-shirt", 1)]),
+    ("1 x Few and Far candle delivered.", [("Few and Far candle", 1)]),
 ])
 def test_inline_real_products_still_parse(body, expected):
     assert _items_list(body) == expected

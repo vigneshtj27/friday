@@ -158,8 +158,14 @@ def _items(body: str) -> tuple[Item, ...]:
                 qty = int(m.group("qty"))
             except (ValueError, TypeError):
                 continue
-            first = name.split()[0].lower() if name else ""
-            if (name and 0 < qty <= 999 and first not in _FIRST_STOP_WORDS
+            toks = name.split()
+            first = toks[0].lower() if toks else ""
+            # A function-word-led capture is prose ONLY when it stays fully lowercase ("the usual amount
+            # of luck"). A real brand keeps its own casing and continues into specific words ("The
+            # Ordinary Niacinamide serum", "All Saints t-shirt", "Few and Far candle"), so an uppercase
+            # letter anywhere after the first word means it's a product, not prose - keep it.
+            stopword_prose = first in _FIRST_STOP_WORDS and not any(c.isupper() for t in toks[1:] for c in t)
+            if (name and 0 < qty <= 999 and not stopword_prose
                     and name.lower() not in {"order", "total", "qty", "quantity", "item", "items"}):  # fmt: skip
                 found[name] = max(found.get(name, 0), qty)
     return tuple(Item(n, q) for n, q in found.items())
