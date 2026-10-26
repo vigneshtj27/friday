@@ -77,6 +77,27 @@ class FakeGoogle:
             self.files[fid] = {"id": fid, "name": meta["name"], "mimeType": "text/csv", "parents": meta.get("parents")}
             return httpx.Response(200, json={"id": fid, "name": meta["name"], "webViewLink": f"https://drive/{fid}"})
         # ---- Sheets
+        m = re.match(r"/v4/spreadsheets/([^/:]+)/values/'(.+?)'!([A-Z]+)(\d+)$", path)
+        if m and request.method == "PUT":  # values.update: overwrite a block anchored at <col><row>
+            sid, tab = m.group(1), m.group(2).replace("''", "'")
+            if sid not in self.sheets or tab not in self.sheets[sid]:
+                return httpx.Response(404)
+            rows = self.sheets[sid][tab]
+            start_row = int(m.group(4)) - 1  # 0-based
+            start_col = 0
+            for ch in m.group(3):
+                start_col = start_col * 26 + (ord(ch) - 64)
+            start_col -= 1
+            new = json.loads(request.content)["values"]
+            while len(rows) < start_row + len(new):
+                rows.append([])
+            for i, r in enumerate(new):  # overwrite cells from start_col, preserving cells to the left
+                row = rows[start_row + i]
+                while len(row) < start_col + len(r):
+                    row.append("")
+                for j, c in enumerate(r):
+                    row[start_col + j] = display(c)
+            return httpx.Response(200, json={"updatedRows": len(new), "updatedCells": sum(len(r) for r in new)})
         m = re.match(r"/v4/spreadsheets/([^/:]+)/values/'(.+?)'(!A1)?(:append)?$", path)
         if m:
             sid, tab = m.group(1), m.group(2).replace("''", "'")

@@ -300,6 +300,18 @@ class SheetsClient:
                                params={"valueRenderOption": "FORMATTED_VALUE", "majorDimension": "ROWS"})  # fmt: skip
         return [[str(c) for c in row] for row in data.get("values", [])]
 
+    async def update(self, sid: str, tab: str, a1: str, rows: list[list[Any]]) -> dict[str, Any]:
+        """Overwrite cells starting at `a1` (e.g. 'A3') with `rows` (USER_ENTERED). Used by the
+        reconciler to rewrite the data block in place; appends stay on append()."""
+        if not rows:
+            return {}
+        rng = f"{a1_tab(tab)}!{a1}"
+        return await self._req(
+            "PUT", f"{SHEETS}/{sid}/values/{quote(rng)}",
+            params={"valueInputOption": "USER_ENTERED"},
+            json={"values": rows, "majorDimension": "ROWS"},
+        )  # fmt: skip
+
     async def append(self, sid: str, tab: str, rows: list[list[Any]]) -> dict[str, Any]:
         if not rows:
             return {}
