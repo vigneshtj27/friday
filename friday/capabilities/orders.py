@@ -86,6 +86,15 @@ _FIRST_STOP_WORDS = frozenset(
     "usual amount favourite favorite lot lots couple bunch few some several many "
     "more less most any all each every same other another number kind sort type bit".split()
 )
+# Reward/offer vocabulary. Used ONLY to reject a stopword-led, title-cased capture whose EVERY content
+# word is one of these ("The Points", "THE POINTS", "The Rewards") - the title-case promo that first-word
+# case alone would keep. It never bites a capture with any other content word, so real brands survive
+# ("The Points Guy" keeps via "Guy"; "The Body Shop lotion" via "Body/Shop/lotion"). Each entry is a
+# loyalty/discount noun a promo line title-cases, justified by the "Earn N x the Points" corpus.
+_PROMO_WORDS = frozenset(
+    "point points reward rewards cashback miles mile bonus bonuses coupon coupons voucher vouchers "
+    "offer offers discount discounts deal deals saving savings perk perks".split()
+)
 
 
 @dataclass(frozen=True)
@@ -143,10 +152,30 @@ def _is_carrier(e: OrderEmail) -> bool:
 
 # Status words that end an item name (so "1 x Mug was delivered" yields "Mug", not the whole phrase).
 _NAME_STOP = re.compile(r"\b(was|were|has|have|had|is|are|been|will|shipped|delivered|dispatched|cancell?ed|returned|refund\w*|tracking|awb|consignment|out for delivery|on (its|the) way|arriving|expected)\b", re.IGNORECASE)
+# An order-reference tail on an otherwise-good item name ("Blue Mug from your order"). Matched only
+# against the EXTRA part the longer of two same-occurrence captures added, so it never touches a product
+# name that genuinely contains "from <place>" ("Scent from the Garden" has no "...order").
+_ORDER_REF_TAIL = re.compile(r"^\s+from\s+(?:your\s+|the\s+|our\s+|my\s+)?orders?\b", re.IGNORECASE)
+
+
+def _merge_occurrence(a: tuple[str, int], b: tuple[str, int]) -> tuple[str, int]:
+    """Two patterns (line-anchored, inline) matched the SAME 'N x' occurrence and produced two names.
+    Keep one: if the longer only tacks an order reference onto the shorter ("Blue Mug" -> "Blue Mug from
+    your order"), keep the short product name; otherwise the longer capture is the fuller product name
+    ("Bag" vs "Bag of Beans", "Save" vs "Save the Duck jacket") - keep it. Qty is the same occurrence."""
+    (na, qa), (nb, qb) = a, b
+    q = max(qa, qb)
+    short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
+    if long_.lower().startswith(short.lower()) and _ORDER_REF_TAIL.match(long_[len(short):]):
+        return (short, q)
+    return (long_, q)
 
 
 def _items(body: str) -> tuple[Item, ...]:
-    found: dict[str, int] = {}
+    # Keep one item per 'N x' occurrence (grouped by the quantity's position in the body), so the
+    # line-anchored and inline patterns matching the same spot don't produce a real item AND a phantom
+    # near-duplicate. Distinct line items sit at different positions, so they all survive.
+    best: dict[int, tuple[str, int]] = {}
     for rx in (*_ITEM_RES, _INLINE_ITEM_RE):
         for m in rx.finditer(body):
             name = re.sub(r"\s+", " ", m.group("name"))
@@ -160,14 +189,24 @@ def _items(body: str) -> tuple[Item, ...]:
                 continue
             toks = name.split()
             first = toks[0].lower() if toks else ""
-            # A function-word-led capture is prose ONLY when it stays fully lowercase ("the usual amount
-            # of luck"). A real brand keeps its own casing and continues into specific words ("The
-            # Ordinary Niacinamide serum", "All Saints t-shirt", "Few and Far candle"), so an uppercase
-            # letter anywhere after the first word means it's a product, not prose - keep it.
-            stopword_prose = first in _FIRST_STOP_WORDS and not any(c.isupper() for t in toks[1:] for c in t)
+            # A function-word-led capture ("the Points", "the usual amount of luck", "a great deal") is
+            # prose/promo unless it is TITLE-CASED like a real brand: its first word is capitalized in the
+            # source AND at least one later word is too ("The Ordinary Niacinamide serum", "All Saints
+            # t-shirt", "Few and Far candle", "The Body Shop"). First-word case is the key signal - promo
+            # leaves the function word lowercase mid-sentence ("Earn 2 x the Points"); a brand capitalizes
+            # it. Requiring a later capital too drops capitalized-sentence prose ("The usual amount ...").
+            title_cased = bool(toks) and toks[0][:1].isupper() and any(c.isupper() for t in toks[1:] for c in t)
+            content = [t.lower().strip(".,!?") for t in toks if t.lower() not in _FIRST_STOP_WORDS]
+            all_promo = bool(content) and all(t in _PROMO_WORDS for t in content)  # "The Points", "THE POINTS"
+            stopword_prose = first in _FIRST_STOP_WORDS and (not title_cased or all_promo)
             if (name and 0 < qty <= 999 and not stopword_prose
                     and name.lower() not in {"order", "total", "qty", "quantity", "item", "items"}):  # fmt: skip
-                found[name] = max(found.get(name, 0), qty)
+                pos = m.start("qty")
+                prev = best.get(pos)
+                best[pos] = (name, qty) if prev is None else _merge_occurrence(prev, (name, qty))
+    found: dict[str, int] = {}
+    for name, qty in best.values():
+        found[name] = max(found.get(name, 0), qty)
     return tuple(Item(n, q) for n, q in found.items())
 
 

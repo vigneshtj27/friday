@@ -163,9 +163,14 @@ def test_no_delivery_email_is_not_verified_undelivered():
     "worth 1 x your money",                   # pronoun prose
     "1 x the points",                         # bare function-word-led prose
     "1 x a great deal",                       # bare function-word-led prose
+    "Earn 2 x the Points on this purchase",   # title-case promo (lowercase "the") - the Part 2 hole
+    "Earn 2 x The Points on this purchase",   # title-case promo (capital "The")
+    "EARN 2 X THE POINTS ON THIS PURCHASE",   # all-caps promo
+    "Collect 2 x The Rewards on your card",    # reward-vocabulary promo (title-cased)
+    "1 x The usual amount of luck",           # capitalized-sentence prose, no second capital
 ])
 def test_inline_prose_parses_no_items(body):
-    assert _items_list(body) == []  # a bare "N x <lowercase function word> ..." is prose, not an order line
+    assert _items_list(body) == []  # promo/prose, not an order line - even when title-cased or all-caps
 
 
 @pytest.mark.parametrize("body,expected", [
@@ -177,9 +182,60 @@ def test_inline_prose_parses_no_items(body):
     ("1 x The Ordinary Niacinamide serum delivered.", [("The Ordinary Niacinamide serum", 1)]),
     ("1 x All Saints t-shirt delivered.", [("All Saints t-shirt", 1)]),
     ("1 x Few and Far candle delivered.", [("Few and Far candle", 1)]),
+    ("1 x The Body Shop lotion delivered.", [("The Body Shop lotion", 1)]),
+    # a stopword-led, title-cased name with a non-promo content word is a real product, not promo
+    ("1 x The Points Guy planner delivered.", [("The Points Guy planner", 1)]),
 ])
 def test_inline_real_products_still_parse(body, expected):
     assert _items_list(body) == expected
+
+
+# ---- Part 3: one item per "N x" occurrence (no line-anchored vs inline phantom) ------------------
+
+
+@pytest.mark.parametrize("body,expected", [
+    # the order-reference tail is dropped; the inline "Blue Mug" and line-anchored full capture collapse
+    ("1 x Blue Mug from your order was delivered", [("Blue Mug", 1)]),
+    ("1 x Blue Mug from order #S1 was delivered", [("Blue Mug", 1)]),
+    # a real product name with an internal preposition keeps its FULL name (no bare-prefix phantom)
+    ("1 x Bag of Beans delivered", [("Bag of Beans", 1)]),
+    ("1 x Save the Duck jacket delivered", [("Save the Duck jacket", 1)]),
+    ("1 x Scent from the Garden delivered", [("Scent from the Garden", 1)]),
+])
+def test_no_phantom_duplicate_per_occurrence(body, expected):
+    assert _items_list(body) == expected
+
+
+def test_distinct_items_where_one_name_prefixes_another_both_survive():
+    # different "N x" occurrences, so a prefix relation across lines must NOT collapse them
+    assert _items_list("1 x Mug\n1 x Mug Warmer") == [("Mug", 1), ("Mug Warmer", 1)]
+
+
+# ---- Part 2 end-to-end: promo inside ELIGIBLE order evidence (has an order id, not excluded) ------
+
+
+def test_promo_line_in_a_confirmation_adds_no_phantom_item():
+    e = parse_order_email(_mail("auto-confirm@amazon.in", "Your order #ORD200 is confirmed",
+                                "Thank you.\n1 x Blue Mug\nEarn 2 x the Points on this purchase\nOrder total: INR 300"))
+    assert e is not None and [(i.name, i.qty) for i in e.items] == [("Blue Mug", 1)]  # no "the Points"
+
+
+def test_promo_in_a_delivery_does_not_block_the_itemless_close():
+    # one real item; the delivery email carries the order id and a promo line. With the phantom gone the
+    # delivery is itemless, so on a single-item order it closes the order instead of the phantom absorbing it.
+    o = _order([
+        _mail("auto-confirm@amazon.in", "Order #ORD300 confirmed", "1 x Blue Mug\nOrder total: INR 300", "c", (2026, 10, 1)),
+        _mail("auto-confirm@amazon.in", "Order #ORD300 delivered",
+              "Your order has been delivered. Earn 2 x the Points on this purchase", "d", (2026, 10, 3)),
+    ])
+    assert [(i["name"], i["state"]) for i in o["items"]] == [("Blue Mug", "delivered")]
+    assert o["open"] is False
+
+
+def test_stopword_led_brand_in_a_confirmation_still_parses():
+    e = parse_order_email(_mail("auto-confirm@amazon.in", "Order #BR1 confirmed",
+                                "1 x The Ordinary Niacinamide serum\nOrder total: INR 650"))
+    assert e is not None and [i.name for i in e.items] == ["The Ordinary Niacinamide serum"]
 
 
 def test_line_anchored_items_unaffected():
