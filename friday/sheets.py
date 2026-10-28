@@ -295,9 +295,11 @@ class SheetsClient:
         if reqs:
             await self._req("POST", f"{SHEETS}/{sid}:batchUpdate", json={"requests": reqs})
 
-    async def read(self, sid: str, tab: str) -> list[list[str]]:
+    async def read(self, sid: str, tab: str, *, render: str = "FORMATTED_VALUE") -> list[list[str]]:
+        """Read a tab. render='FORMULA' returns the underlying formulas (a cell like '=SUM(..)') instead
+        of their displayed values, so a writer can refuse to overwrite a formula cell."""
         data = await self._req("GET", f"{SHEETS}/{sid}/values/{quote(a1_tab(tab))}",
-                               params={"valueRenderOption": "FORMATTED_VALUE", "majorDimension": "ROWS"})  # fmt: skip
+                               params={"valueRenderOption": render, "majorDimension": "ROWS"})  # fmt: skip
         return [[str(c) for c in row] for row in data.get("values", [])]
 
     async def update(self, sid: str, tab: str, a1: str, rows: list[list[Any]]) -> dict[str, Any]:

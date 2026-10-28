@@ -17,29 +17,30 @@ from friday.tools.reconcile_tools import apply_cards_summary, apply_reconcile
 from .fake_google import SID, FakeGoogle, install
 from .test_tools import approve_next
 
-HEADER = ["No", "Date", "Narration", "", "", "Debit", "Credit", "Comments", "Bank"]
+HEADER = ["No", "Date", "Narration", "", "", "Debit", "Credit", "Comments", "Bank", "Txn ID"]
 START, END = "2026-10-01", "2026-10-31"
 
 
-def _row(no, d, narr, debit="", credit="", comment="", bank="Amex"):
-    return [str(no), d, narr, "", "", str(debit) if debit else "", str(credit) if credit else "", comment, bank]
+def _row(no, d, narr, debit="", credit="", comment="", bank="Amex", txnid=""):
+    return [str(no), d, narr, "", "", str(debit) if debit else "", str(credit) if credit else "", comment, bank, txnid]
 
 
 @pytest.fixture
 def g(ctx):
     sheet = [list(HEADER),
-             _row(1, "05/10/2026", "Blue Mart groceries", debit="500", comment="food"),
-             _row(2, "10/10/2026", f"Hotel Zurich {PENDING_MARK}", debit="730.85", comment="trip")]
+             _row(1, "05/10/2026", "Blue Mart groceries", debit="500", comment="food", txnid="BM1"),
+             _row(2, "10/10/2026", f"Hotel Zurich {PENDING_MARK}", debit="730.85", comment="trip", txnid="HZ9")]
     fake = FakeGoogle(sheets={SID: {"Expenses": sheet}}, titles={SID: "Expense Tracker"})
     install(ctx, fake)
     return ctx, fake
 
 
 def _portal():
+    # real portals supply transaction ids; reliable identity makes re-runs idempotent and settles robust
     return (
-        [{"date": "2026-10-09", "narration": "Kettle Co", "amount": "300"},            # new posted
-         {"date": "2026-10-12", "narration": "Hotel Zurich", "amount": "745.20"}],     # posts the pending (FX)
-        [{"date": "2026-10-15", "narration": "Cafe Mocha", "amount": "222"}],          # new pending
+        [{"date": "2026-10-09", "narration": "Kettle Co", "amount": "300", "txn_id": "K1"},           # new posted
+         {"date": "2026-10-12", "narration": "Hotel Zurich", "amount": "745.20", "txn_id": "HZ9"}],   # posts the pending (id + FX)
+        [{"date": "2026-10-15", "narration": "Cafe Mocha", "amount": "222", "txn_id": "CM1"}],        # new pending
     )
 
 
@@ -122,6 +123,58 @@ async def test_reconcile_makes_no_payment_navigation(g):
 
 
 # ---- Cards summary refresh ----------------------------------------------------------------------
+
+
+async def test_reconcile_reads_a_stored_fetch_not_model_supplied_rows(ctx):
+    from datetime import date as D
+    from decimal import Decimal
+
+    from friday.reconcile_sheet import PortalTxn
+    from friday.tools.base import ToolError
+
+    sheet = [list(HEADER), _row(1, "05/10/2026", "Blue Mart groceries", debit="500", txnid="BM1")]
+    fake = FakeGoogle(sheets={SID: {"Expenses": sheet}}, titles={SID: "T"})
+    install(ctx, fake)
+    txns = [PortalTxn(D(2026, 10, 9), "Kettle Co", Decimal("300"), status="posted", txn_id="K1"),
+            PortalTxn(D(2026, 10, 15), "Cafe Mocha", Decimal("222"), status="pending", txn_id="CM1")]
+    assert ctx.portal_activity.record("fetch-1", "amex.me", txns)["new"] == 2
+    assert ctx.portal_activity.record("fetch-1", "amex.me", txns)["new"] == 0  # re-record is deduped
+
+    call = Call(ctx=ctx, owner_text="reconcile amex", plan_id="p1")
+    args = {"spreadsheet": SID, "tab": "Expenses", "source_label": "Amex", "account": "amex.me",
+            "start": START, "end": END, "dry_run": True}  # fmt: skip
+    out = await ctx.tools.call("reconcile_expense_sheet", args, call)
+    assert out["activity_source"] == "stored_fetch" and out["append"] == 2  # read from the store, not args
+    # a source with no stored fetch fails with a clear, honest error (never silently empty)
+    with pytest.raises(ToolError, match="no stored portal activity"):
+        await ctx.tools.call("reconcile_expense_sheet", {**args, "account": "nope.me"}, call)
+
+
+async def test_write_range_with_a_formula_pauses_and_writes_nothing(ctx):
+    # 1.6: a data cell is a formula; rewriting the block from displayed values would destroy it -> pause
+    sheet = [list(HEADER),
+             _row(1, "05/10/2026", "Blue Mart", debit="500", txnid="BM1"),
+             _row(2, "10/10/2026", "Running total", debit="=SUM(F2:F2)")]  # a formula cell in the range
+    fake = FakeGoogle(sheets={SID: {"Expenses": sheet}}, titles={SID: "T"})
+    install(ctx, fake)
+    before = [list(r) for r in fake.sheets[SID]["Expenses"]]
+    out = await _call(ctx, dry_run=False)
+    assert out["paused"] and not out.get("written")
+    assert any("formula" in c for c in out["conflicts"]) and "F3" in " ".join(out["conflicts"])
+    assert fake.sheets[SID]["Expenses"] == before  # nothing written
+
+
+def test_derived_figure_only_goes_into_a_derived_labelled_cell():
+    from friday.tools.reconcile_tools import plan_cards_update
+
+    summary = {"total_exposure": "827751.38", "posted_balance": "827020.53"}
+    # label NOT marked derived -> total exposure is refused; posted balance still written
+    plain = plan_cards_update([["Posted balance", "0"], ["Total exposure", "0"]], summary)
+    keys = {r for r, _, _ in plain}
+    assert 0 in keys and 1 not in keys  # posted written (row 0), total-exposure cell (row 1) refused
+    # label explicitly marked derived -> written
+    marked = plan_cards_update([["Total exposure (derived)", "0"]], summary)
+    assert len(marked) == 1 and marked[0][2] == "827751.38"
 
 
 async def test_cards_summary_updates_cells_posted_and_pending_separate(ctx):

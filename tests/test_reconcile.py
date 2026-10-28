@@ -20,8 +20,21 @@ def _row(no, d, narr, debit="", credit="", comment="", bank="Amex"):
     return [str(no), d, narr, "", "", str(debit) if debit else "", str(credit) if credit else "", comment, bank]
 
 
-def _p(d, narr, amount, direction="debit", status="posted"):
-    return PortalTxn(date=d, description=narr, amount=Decimal(str(amount)), direction=direction, status=status)
+def _p(d, narr, amount, direction="debit", status="posted", txn_id=None):
+    return PortalTxn(date=d, description=narr, amount=Decimal(str(amount)), direction=direction,
+                     status=status, txn_id=txn_id)  # fmt: skip
+
+
+# a layout with a Txn ID column (J), for reliable-identity tests
+HEADER_TID = ["No", "Date", "Narration", "", "", "Debit", "Credit", "Comments", "Bank", "Txn ID"]
+
+
+def _sheet_tid(*rows):
+    return [list(HEADER_TID), *[list(r) for r in rows]]
+
+
+def _row_tid(no, d, narr, debit="", credit="", comment="", bank="Amex", txnid=""):
+    return [str(no), d, narr, "", "", str(debit) if debit else "", str(credit) if credit else "", comment, bank, txnid]
 
 
 def _run(values, portal):
@@ -38,10 +51,91 @@ def test_new_posted_charge_is_appended():
     assert len(plan.new_data_rows) == 2  # one existing + one appended
 
 
-def test_duplicate_posted_charge_is_skipped():
+def test_duplicate_skipped_only_on_a_matching_transaction_id():
+    # reliable identity: the sheet row carries the same txn id -> a true duplicate, skipped
+    plan = _run(_sheet_tid(_row_tid(1, "05/10/2026", "Blue Mart groceries", debit="500", txnid="TXN1")),
+                [_p(date(2026, 10, 5), "Blue Mart groceries", 500, txn_id="TXN1")])  # fmt: skip
+    assert plan.duplicates == 1 and not plan.appends and not plan.settles
+
+
+def test_lookalike_without_an_id_is_entered_and_flagged_not_silently_skipped():
+    # 1.2: same day, amount and merchant but NO reliable id -> two real charges can look alike, so enter
+    # the charge and flag the pair; never a silent skip on similarity.
     plan = _run(_sheet(_row(1, "05/10/2026", "Blue Mart groceries", debit="500")),
                 [_p(date(2026, 10, 5), "Blue Mart groceries", 500)])  # fmt: skip
-    assert plan.duplicates == 1 and not plan.appends and not plan.settles
+    assert plan.duplicates == 0 and len(plan.appends) == 1
+    assert len(plan.possible_duplicates) == 1 and plan.possible_duplicates[0]["candidate_rows"] == [1]
+
+
+def test_two_portal_charges_sharing_an_id_enter_only_once():
+    # rows from the same fetch batch must not double-enter one charge, but must not collapse two real ones
+    plan = _run(_sheet(_row(1, "01/10/2026", "Seed", debit="10")),
+                [_p(date(2026, 10, 9), "Kettle Co", 300, txn_id="K9"),
+                 _p(date(2026, 10, 9), "Kettle Co", 300, txn_id="K9")])  # fmt: skip
+    assert len(plan.appends) == 1 and plan.duplicates == 1
+
+
+def test_two_real_same_day_same_amount_charges_both_enter():
+    plan = _run(_sheet(_row(1, "01/10/2026", "Seed", debit="10")),
+                [_p(date(2026, 10, 9), "Kettle Co", 300, txn_id="A1"),
+                 _p(date(2026, 10, 9), "Kettle Co", 300, txn_id="A2")])  # fmt: skip
+    assert len(plan.appends) == 2 and plan.duplicates == 0  # distinct ids -> two charges
+
+
+# ---- 1.1 date window -----------------------------------------------------------------------------
+
+
+def test_charges_outside_the_window_are_excluded_and_counted():
+    plan = _run(_sheet(_row(1, "05/10/2026", "Seed", debit="10")),
+                [_p(date(2026, 9, 28), "Before window", 100),      # out
+                 _p(date(2026, 11, 2), "After window", 200),       # out
+                 _p(date(2026, 10, 15), "In window", 300)])        # in
+    assert plan.out_of_window == 2 and len(plan.appends) == 1
+    assert "In window" in plan.appends[0][2]
+
+
+# ---- 1.3 pending/posted double-counting, both directions ----------------------------------------
+
+
+def test_portal_pending_matching_an_already_posted_row_is_not_double_entered():
+    # 1.3(a): the sheet already has the posted row; the portal still lists it pending -> flag, don't add
+    plan = _run(
+        _sheet(_row(1, "10/10/2026", "Hotel Zurich", debit="730.85")),  # already posted earlier
+        [_p(date(2026, 10, 10), "Hotel Zurich", "730.85", status="pending")],
+    )
+    assert not plan.appends and plan.ambiguous
+    assert "posted row may already be it" in plan.ambiguous[0]["reason"]
+
+
+def test_posted_charge_that_renarrates_a_pending_row_is_flagged_not_doubled():
+    # 1.3(b): a pending row, same amount, but the bank renarrated it so no token overlaps -> unresolved,
+    # enter nothing, and the stale pending row is left intact (not deleted, not auto-merged)
+    plan = _run(
+        _sheet(_row(1, "10/10/2026", f"POS 4471 AUTH {PENDING_MARK}", debit="500")),
+        [_p(date(2026, 10, 12), "Blue Mart Groceries", 500)],
+    )
+    assert not plan.appends and not plan.settles and plan.ambiguous
+    assert "unresolved" in plan.ambiguous[0]["reason"]
+
+
+def test_posted_charge_amount_beyond_fx_but_related_to_a_pending_row_is_flagged():
+    # same merchant, amount moved far beyond the 3% FX tolerance (a tip / partial) -> flag, enter nothing
+    plan = _run(
+        _sheet(_row(1, "10/10/2026", f"Cafe Mocha {PENDING_MARK}", debit="500")),
+        [_p(date(2026, 10, 11), "Cafe Mocha", 560)],  # +12%, beyond FX-close, within related band
+    )
+    assert not plan.appends and not plan.settles and plan.ambiguous
+    assert "beyond FX" in plan.ambiguous[0]["reason"]
+
+
+def test_pending_posts_on_a_matching_id_even_when_narration_changed():
+    # reliable identity settles across a narration change the heuristic would miss
+    plan = reconcile(
+        _sheet_tid(_row_tid(1, "10/10/2026", f"POS 4471 {PENDING_MARK}", debit="500", txnid="T7")),
+        [_p(date(2026, 10, 12), "Blue Mart Groceries", 500, txn_id="T7")],
+        source_label="Amex", start=START, end=END,
+    )
+    assert len(plan.settles) == 1 and not plan.appends
 
 
 def test_pending_charge_entered_with_marker_and_amount():

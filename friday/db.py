@@ -445,6 +445,29 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX order_events_key ON order_events(order_key, event_date);
     """,
+    # Fetched card/bank portal activity (friday/portal_activity.py). Each row is one charge a fetch read,
+    # with its posted/pending status, the fetch run that produced it, when it was retrieved, and the
+    # portal/bank transaction id when the portal gives one (the reliable identity the reconciler uses).
+    # This is the auditable source the reconciler reads, instead of the model hand-carrying activity.
+    """
+    CREATE TABLE portal_activity (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        status TEXT NOT NULL,            -- posted | pending
+        txn_id TEXT,                     -- portal/bank transaction id, when available
+        date TEXT NOT NULL,
+        description TEXT NOT NULL,
+        amount TEXT NOT NULL,            -- positive magnitude
+        currency TEXT NOT NULL DEFAULT 'INR',
+        direction TEXT NOT NULL DEFAULT 'debit',
+        retrieved_at TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX portal_activity_dedupe ON portal_activity(run_id, dedupe_key);
+    CREATE INDEX portal_activity_run ON portal_activity(run_id);
+    CREATE INDEX portal_activity_source ON portal_activity(source, retrieved_at);
+    """,
 ]
 
 
